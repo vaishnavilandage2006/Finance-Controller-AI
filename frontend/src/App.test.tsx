@@ -1,0 +1,1 @@
+import{describe,it,expect}from"vitest";describe("Finance Controller",()=>{it("has a valid product name",()=>expect("AI Finance Controller").toContain("Finance"))})

@@ -1,0 +1,16 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+sqlalchemy==2.0.43
+alembic==1.16.4
+pydantic==2.11.7
+email-validator==2.3.0
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+passlib[argon2]==1.7.4
+python-jose[cryptography]==3.5.0
+slowapi==0.1.9
+pandas==2.3.2
+numpy==2.3.2
+scikit-learn==1.7.1
+pytest==8.4.1
+httpx==0.28.1

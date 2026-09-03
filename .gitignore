@@ -1,0 +1,39 @@
+# Environment files (keep .env.example)
+.env
+.env.*
+!.env.example
+
+# Python
+.venv*/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+
+# Node / frontend build
+node_modules/
+dist/
+
+# Databases & local data
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
+
+# Backup / debug / scratch (kept locally, never committed)
+*.bak
+*.debug-backup
+*_backup_before_*
+backend/app/services/ai/providers_backup.py
+debug-backups/
+structure.txt
+
+# One-off maintenance scripts (kept locally)
+backend/fix_review_queue.py
+backend/_patch_providers.py
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
