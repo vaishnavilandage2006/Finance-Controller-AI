@@ -1668,11 +1668,44 @@ def cfo_report(
     db: Session = Depends(get_db),
     u=Depends(current_user)
 ):
+    from sqlalchemy import case
+
+    revenue_types = ("revenue", "income", "sale", "payment")
+    expense_types = ("expense", "purchase", "payout")
+    type_name = func.lower(Transaction.type)
+    daily_rows = db.query(
+        Transaction.date,
+        func.coalesce(func.sum(case((type_name.in_(revenue_types), Transaction.amount), else_=0)), 0).label("revenue"),
+        func.coalesce(func.sum(case((type_name.in_(expense_types), Transaction.amount), else_=0)), 0).label("expenses"),
+    ).filter(Transaction.date.isnot(None)).group_by(Transaction.date).order_by(Transaction.date).all()
+    expense_rows = db.query(
+        Transaction.type,
+        func.coalesce(func.sum(Transaction.amount), 0).label("amount"),
+        func.count(Transaction.id).label("count"),
+    ).filter(type_name.in_(expense_types)).group_by(Transaction.type).order_by(func.sum(Transaction.amount).desc()).all()
+    report_metrics = metrics(db)
 
     return {
         "title": "CFO Executive Report",
 
-        "metrics": metrics(db),
+        "metrics": report_metrics,
+        "cash_flow_trend": [
+            {
+                "date": row.date,
+                "revenue": round(float(row.revenue or 0), 2),
+                "expenses": round(float(row.expenses or 0), 2),
+                "net_cash_flow": round(float(row.revenue or 0) - float(row.expenses or 0), 2),
+            }
+            for row in daily_rows
+        ],
+        "expense_breakdown": [
+            {
+                "type": str(row.type or "Unclassified").title(),
+                "amount": round(float(row.amount or 0), 2),
+                "count": int(row.count or 0),
+            }
+            for row in expense_rows
+        ],
 
         "priority_actions": [
             "Review high-risk transactions",

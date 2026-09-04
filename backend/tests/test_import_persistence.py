@@ -63,6 +63,11 @@ def test_new_csv_import_persists_rows_and_derived_records(tmp_path):
             assert client.get("/api/analytics", headers=headers).status_code == 200
             assert client.get(f"/api/risk?run_id={run_id}", headers=headers).status_code == 200
             assert client.get(f"/api/reconciliation?run_id={run_id}", headers=headers).json()["total"] == 2
+            report = client.get("/api/reports/cfo", headers=headers)
+            assert report.status_code == 200
+            assert report.json()["metrics"]["total_transactions"] == 2
+            assert len(report.json()["cash_flow_trend"]) == 1
+            assert report.json()["expense_breakdown"][0]["amount"] == 2400
             assert any(
                 row["action"] == "CSV_IMPORT"
                 for row in client.get("/api/audit", headers=headers).json()

@@ -7,6 +7,11 @@ import {
   Tooltip,
   BarChart,
   Bar,
+  LineChart,
+  Line,
+  AreaChart,
+  Area,
+  Legend,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -6077,6 +6082,93 @@ function RiskAnomalyView({
   );
 }
 
+function CfoCommandCenter() {
+  const [report, setReport] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const navigate = useNavigate();
+
+  async function loadReport() {
+    setLoading(true);
+    setError("");
+    try {
+      setReport(await apiGet("/reports/cfo"));
+    } catch (err) {
+      console.error(err);
+      setError("Unable to load the CFO command center.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadReport();
+    window.addEventListener("reconciliation:completed", loadReport);
+    return () => window.removeEventListener("reconciliation:completed", loadReport);
+  }, []);
+
+  if (loading) return <div className="state">Loading CFO command center...</div>;
+  if (error) return <div className="state"><p>{error}</p><button type="button" onClick={loadReport}>Retry</button></div>;
+
+  const metrics = report?.metrics || {};
+  const reconciliation = metrics.reconciliation || {};
+  const financial = metrics.financial || {};
+  const trend = Array.isArray(report?.cash_flow_trend) ? report.cash_flow_trend : [];
+  const expenses = Array.isArray(report?.expense_breakdown) ? report.expense_breakdown : [];
+  const riskDistribution = metrics.risk_distribution || {};
+  const riskExposure = Number(reconciliation.variance || 0);
+  const unresolved = Number(reconciliation.exceptions || 0);
+  const riskStatus = Number(metrics.high_risk || 0) > 0 ? "Attention required" : "Within current run";
+  const health = Number(reconciliation.match_rate || 0);
+  const moneyValue = (key: string, fallback: number) =>
+    financial[key]?.available ? Number(financial[key].value || 0) : fallback;
+  const revenue = moneyValue("revenue", Number(metrics.revenue || 0));
+  const expense = moneyValue("expenses", Number(metrics.expenses || 0));
+  const netPosition = Number(metrics.net_profit || 0);
+  const hasTrend = trend.length > 0;
+  const severity = (danger: boolean, warning: boolean) => danger ? "danger" : warning ? "warning" : "positive";
+  const kpis = [
+    { label: "Revenue", value: currency(revenue), detail: financial.revenue?.available ? "Current data" : "Unavailable in current data", tone: severity(revenue < 0, !financial.revenue?.available) },
+    { label: "Expenses", value: currency(expense), detail: financial.expenses?.available ? "Current data" : "Unavailable in current data", tone: severity(expense > revenue && revenue > 0, !financial.expenses?.available) },
+    { label: "Net position", value: currency(netPosition), detail: netPosition >= 0 ? "Positive position" : "Negative position", tone: severity(netPosition < 0, false) },
+    { label: "Risk exposure", value: currency(riskExposure), detail: `${Number(metrics.high_risk || 0)} high-risk items`, tone: severity(Number(metrics.high_risk || 0) > 0, riskExposure > 0) },
+    { label: "Reconciliation health", value: `${health.toFixed(1)}%`, detail: `${unresolved} unresolved`, tone: severity(health < 90, health < 98) },
+  ];
+  const attention = [
+    Number(metrics.high_risk || 0) > 0 ? { tone: "danger", title: `${metrics.high_risk} high-risk transaction${metrics.high_risk === 1 ? "" : "s"}`, detail: "Review deterministic risk assessments before approval.", amount: `${metrics.high_risk} item${metrics.high_risk === 1 ? "" : "s"}`, action: "Open risk", onClick: () => navigate("/risk-assessment") } : null,
+    unresolved > 0 ? { tone: "warning", title: `${unresolved} unresolved reconciliation item${unresolved === 1 ? "" : "s"}`, detail: "Exceptions remain in the current reconciliation run.", amount: `${unresolved} item${unresolved === 1 ? "" : "s"}`, action: "Open review queue", onClick: () => navigate("/review-queue") } : null,
+    Number(metrics.largest_variance || 0) > 0 ? { tone: "warning", title: "Largest variance requires review", detail: "The current run contains a material reconciliation variance.", amount: currency(Number(metrics.largest_variance || 0)), action: "Open reconciliation", onClick: () => navigate("/reconciliation") } : null,
+  ].filter(Boolean) as any[];
+
+  return (
+    <div className="cfo-command-center">
+      <header>
+        <div><h1>CFO Command Center</h1><p className="cfo-subtitle">Current financial position, control health, and decisions requiring attention.</p></div>
+        <button type="button" style={secondaryButton} onClick={loadReport}>Refresh</button>
+      </header>
+
+      <section className="cfo-kpis" aria-label="Executive KPIs">
+        {kpis.map((kpi) => <div className={`cfo-kpi ${kpi.tone}`} key={kpi.label}><span>{kpi.label}</span><strong>{kpi.value}</strong><small>{kpi.detail}</small></div>)}
+      </section>
+
+      <section className="cfo-chart-grid">
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Revenue vs expenses</h2><p>Grouped by transaction date</p></div></div>{hasTrend ? <ResponsiveContainer width="100%" height={250}><LineChart data={trend}><CartesianGrid vertical={false} stroke="#e8edf3" /><XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} /><YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={(value: any) => formatChartMoney(value)} /><Tooltip formatter={(value: any) => [currency(Number(value)), "Amount"]} /><Legend /><Line type="monotone" dataKey="revenue" name="Revenue" stroke="#18805b" strokeWidth={3} dot={false} /><Line type="monotone" dataKey="expenses" name="Expenses" stroke="#c2413b" strokeWidth={3} dot={false} /></LineChart></ResponsiveContainer> : <div className="cfo-empty">No dated transaction data is available for this chart.</div>}</div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Cash flow trend</h2><p>Revenue, expenses, and net cash flow</p></div></div>{hasTrend ? <ResponsiveContainer width="100%" height={250}><AreaChart data={trend}><CartesianGrid vertical={false} stroke="#e8edf3" /><XAxis dataKey="date" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} /><YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11 }} tickFormatter={(value: any) => formatChartMoney(value)} /><Tooltip formatter={(value: any) => [currency(Number(value)), "Amount"]} /><Area type="monotone" dataKey="net_cash_flow" name="Net cash flow" stroke="#1769d1" fill="#dbeafe" strokeWidth={2} /><Line type="monotone" dataKey="revenue" name="Revenue" stroke="#18805b" dot={false} /><Line type="monotone" dataKey="expenses" name="Expenses" stroke="#c2413b" dot={false} /></AreaChart></ResponsiveContainer> : <div className="cfo-empty">No dated transaction data is available for this chart.</div>}</div>
+      </section>
+
+      <section className="cfo-chart-grid">
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Risk distribution</h2><p>Current reconciliation run</p></div></div><div className="cfo-distribution">{[["LOW", "Low risk", "#18805b"], ["MEDIUM", "Medium risk", "#c27a16"], ["HIGH", "High risk", "#c2413b"]].map(([key, label, color]) => <div className="cfo-distribution-row" key={key}><span><i style={{ background: color }} />{label}</span><strong>{Number(riskDistribution[key] || 0) + (key === "HIGH" ? Number(riskDistribution.CRITICAL || 0) : 0)}</strong></div>)}</div></div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Reconciliation health</h2><p>Current run outcome</p></div></div><div className="cfo-health"><div className="cfo-health-ring" style={{ background: `conic-gradient(#18805b ${health}%, #e8edf3 0)` }}><div><strong>{health.toFixed(1)}%</strong><small>matched</small></div></div><div className="cfo-health-legend"><span><i className="matched" />Matched <b>{Number(reconciliation.matched || 0)}</b></span><span><i className="partial" />Partial <b>{Number(reconciliation.partial || 0)}</b></span><span><i className="unmatched" />Unmatched <b>{Number(reconciliation.unmatched || 0)}</b></span></div></div></div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Expense breakdown</h2><p>Actual expense types</p></div></div>{expenses.length ? <div className="cfo-bars">{expenses.map((item: any) => <div className="cfo-bar-row" key={item.type}><div><span>{item.type}</span><strong>{currency(item.amount)}</strong></div><div className="cfo-bar-track"><i style={{ width: `${Math.min(100, Number(item.amount) / Math.max(...expenses.map((expenseItem: any) => Number(expenseItem.amount)), 1) * 100)}%` }} /></div></div>)}</div> : <div className="cfo-empty">No expense categories are available.</div>}</div>
+      </section>
+
+      <section className="cfo-attention"><div className="cfo-section-heading"><div><h2>CFO attention required</h2><p>Prioritized from current risk and reconciliation data.</p></div><button type="button" style={secondaryButton} onClick={() => navigate("/analytics")}>Open analytics</button></div>{attention.length ? <div className="cfo-issues">{attention.map((issue) => <div className={`cfo-issue ${issue.tone}`} key={issue.title}><div className="cfo-issue-marker" /><div className="cfo-issue-copy"><strong>{issue.title}</strong><span>{issue.detail}</span></div><b>{issue.amount}</b><button type="button" style={secondaryButton} onClick={issue.onClick}>{issue.action}</button></div>)}</div> : <div className="cfo-empty">No unresolved control issues are recorded for the current data.</div>}</section>
+
+      <section className="cfo-takeaway"><div><span className="cfo-eyebrow">CFO TAKEAWAY</span><h2>Decision-ready summary</h2><div className="cfo-takeaway-metrics"><span>Revenue <b>{currency(revenue)}</b></span><span>Expenses <b>{currency(expense)}</b></span><span>Risk exposure <b>{currency(riskExposure)}</b></span><span>Unresolved <b>{unresolved}</b></span></div><p><strong>DECISION:</strong> {unresolved || Number(metrics.high_risk || 0) ? "Prioritize unresolved reconciliation and risk items before approving the current financial position." : "The current data shows no unresolved control issues requiring immediate escalation."}</p></div><button type="button" style={primaryButton} onClick={() => navigate("/reconciliation")}>Review current controls</button></section>
+    </div>
+  );
+}
+
 function Page({
   title,
 }: {
@@ -7994,6 +8086,13 @@ export default function App() {
         path="/anomaly-detection"
         element={
           isLoggedIn ? <Layout><RiskAnomalyView kind="anomaly" /></Layout> : <Navigate to="/login" replace />
+        }
+      />
+
+      <Route
+        path="/cfo-reports"
+        element={
+          isLoggedIn ? <Layout><CfoCommandCenter /></Layout> : <Navigate to="/login" replace />
         }
       />
 
