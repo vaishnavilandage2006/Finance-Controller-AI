@@ -8,12 +8,12 @@ pydantic-settings==2.10.1
 python-multipart==0.0.20
 passlib[argon2]==1.7.4
 python-jose[cryptography]==3.5.0
-psycopg[binary]==3.2.9
+
 slowapi==0.1.9
 pandas==2.3.2
 numpy==2.3.2
 scikit-learn==1.7.1
 pytest==8.4.1
 httpx==0.28.1
-psycopg2-binary
+
 psycopg2-binary==2.9.9
