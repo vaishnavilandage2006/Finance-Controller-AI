@@ -64,6 +64,25 @@ def _risk_for_transaction(db, transaction_id, run_id):
     return max(rows, key=lambda r: r.risk_score or 0)
 
 
+def _in_chunks(values, size=1000):
+    values = list(values)
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
+
+
+def _transactions_by_id(db, transaction_ids):
+    result = {}
+    for chunk in _in_chunks(set(transaction_ids)):
+        if chunk:
+            result.update({
+                row.transaction_id: row
+                for row in db.query(Transaction).filter(
+                    Transaction.transaction_id.in_(chunk)
+                ).all()
+            })
+    return result
+
+
 def _upsert_exception_risk(db, run_id, transaction_ref, amount, settlement_amount, variance, reason, seen):
     """Score one exception of a run and upsert its RiskAssessment row
     (run isolated via a 'source_run:<run_id>' marker in risk_factors).
@@ -79,26 +98,12 @@ def _upsert_exception_risk(db, run_id, transaction_ref, amount, settlement_amoun
     )
     marker = run_marker(run_id)
     stored = json.dumps(factors + [marker])
-    existing = (
-        db.query(RiskAssessment)
-        .filter(
-            RiskAssessment.transaction_id == transaction_ref,
-            RiskAssessment.risk_factors.like(f"%{marker}%"),
-        )
-        .order_by(RiskAssessment.id.desc())
-        .first()
-    )
-    if existing is None:
-        db.add(RiskAssessment(
-            transaction_id=transaction_ref,
-            risk_score=score,
-            risk_level=level,
-            risk_factors=stored,
-        ))
-    else:
-        existing.risk_score = score
-        existing.risk_level = level
-        existing.risk_factors = stored
+    db.add(RiskAssessment(
+        transaction_id=transaction_ref,
+        risk_score=score,
+        risk_level=level,
+        risk_factors=stored,
+    ))
     if level not in ("HIGH", "CRITICAL"):
         return
     settlement_text = (
@@ -111,27 +116,13 @@ def _upsert_exception_risk(db, run_id, transaction_ref, amount, settlement_amoun
         f"settlement={settlement_text}; variance={float(variance or 0):.2f}; "
         f"{reason or 'High-risk reconciliation exception.'}"
     )
-    anomaly = (
-        db.query(Anomaly)
-        .filter(
-            Anomaly.transaction_id == transaction_ref,
-            Anomaly.evidence.like(f"%Run {run_id}%"),
-        )
-        .order_by(Anomaly.id.desc())
-        .first()
-    )
-    if anomaly is None:
-        db.add(Anomaly(
-            transaction_id=transaction_ref,
-            reason="High-risk reconciliation exception.",
-            severity=level,
-            evidence=evidence,
-            score=score,
-        ))
-    else:
-        anomaly.score = score
-        anomaly.severity = level
-        anomaly.evidence = evidence
+    db.add(Anomaly(
+        transaction_id=transaction_ref,
+        reason="High-risk reconciliation exception.",
+        severity=level,
+        evidence=evidence,
+        score=score,
+    ))
 
 
 
@@ -220,12 +211,15 @@ def _upsert_reconciliation_transaction(
     description=None,
     fee=0,
     currency="INR",
+    existing=None,
 ):
-    transaction = (
-        db.query(Transaction)
-        .filter(Transaction.transaction_id == transaction_id)
-        .first()
-    )
+    transaction = existing
+    if transaction is None:
+        transaction = (
+            db.query(Transaction)
+            .filter(Transaction.transaction_id == transaction_id)
+            .first()
+        )
 
     if transaction is None:
         transaction = Transaction(
@@ -640,16 +634,20 @@ async def multi_file_reconciliation(
     db.add(run)
 
     exception_statuses = {"PARTIAL", "MISMATCH", "UNMATCHED", "DUPLICATE", "EXCEPTION"}
+    transaction_map = _transactions_by_id(
+        db,
+        record["reference"] for record in records,
+    )
+    source_maps = {
+        source: {
+            source_record.reference: source_record
+            for source_record in parsed.get(source, [])
+        }
+        for source in ("bank", "ledger", "settlement")
+    }
     for record in records:
         source_records = {
-            source: next(
-                (
-                    source_record
-                    for source_record in parsed.get(source, [])
-                    if source_record.reference == record["reference"]
-                ),
-                None,
-            )
+            source: source_maps[source].get(record["reference"])
             for source in ("bank", "ledger", "settlement")
         }
         bank_record = source_records["bank"]
@@ -668,7 +666,7 @@ async def multi_file_reconciliation(
             ),
             None,
         )
-        _upsert_reconciliation_transaction(
+        transaction = _upsert_reconciliation_transaction(
             db,
             record["reference"],
             amount_record.amount if amount_record else 0,
@@ -689,18 +687,24 @@ async def multi_file_reconciliation(
                 if amount_record
                 else "INR"
             ),
+            existing=transaction_map.get(record["reference"]),
         )
-        _upsert_reconciliation_result(
-            db,
-            run_id,
-            record["reference"],
-            record["status"],
-            record["variance"],
-            record["reason"],
-        )
+        db.add(ReconciliationResult(
+            run_id=run_id,
+            transaction_id=record["reference"],
+            status=record["status"],
+            variance=float(record["variance"] or 0),
+            reason=record["reason"] or "",
+        ))
+        transaction_map[record["reference"]] = transaction
         if record["status"] not in exception_statuses:
             continue
-        _upsert_review_item(db, run_id, record["reference"], record["reason"])
+        db.add(ReviewItem(
+            run_id=run_id,
+            transaction_id=record["reference"],
+            status="OPEN",
+            note=record["reason"],
+        ))
 
     db.add(
         AuditLog(
