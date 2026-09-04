@@ -1,12 +1,12 @@
 # AI Finance Controller
 
-Enterprise-style financial intelligence application using React/TypeScript/Vite, FastAPI/Python, SQLAlchemy and SQLite. It runs in **Mock AI mode without an API key** and uses synthetic demo transactions only.
+Enterprise-style financial intelligence application using React/TypeScript/Vite, FastAPI/Python, SQLAlchemy and PostgreSQL in production. It runs in **Mock AI mode without an API key** and uses local demo transactions only when explicitly seeded.
 
 ## Features
 Dashboard, transaction search/pagination, reconciliation metrics, anomaly/risk views, review queue with backend authorization, analytics, forecasting baseline, scenario simulator API, CFO report API, alerts, audit logs, CSV import validation, RBAC foundation, Argon2id password hashing, JWT expiry, CORS, safe API errors, and grounded Mock AI Copilot.
 
 ## Architecture
-CSV -> schema detection -> canonical normalization -> deterministic matching -> SQLite -> UI/AI structured context. Financial source data is treated as untrusted data and never becomes instructions.
+CSV -> schema detection -> canonical normalization -> deterministic matching -> PostgreSQL -> UI/AI structured context. Financial source data is treated as untrusted data and never becomes instructions.
 
 ## Adaptive reconciliation
 Single-file and multi-file reconciliation accept arbitrary `.csv` filenames. Headers are normalized and matched against semantic aliases for identifiers, amounts, fees, refunds, adjustments, dates, parties, currencies, and descriptions; unknown columns are retained in result evidence.
@@ -55,7 +55,7 @@ Development/demo only; change it before any real deployment.
 Default: `AI_PROVIDER=mock`. No key is required. Later, add the provider key in **backend/.env** as `AI_API_KEY=...` and set `AI_PROVIDER=external`. The provider abstraction is in `backend/app/services/ai/providers.py`; the external adapter is intentionally conservative until a specific provider SDK is selected.
 
 ## Database / migrations
-SQLite is created automatically and seed data is generated from `database/sample_data/finance_transactions.csv`. The included migration module creates the schema; for a production Alembic workflow, point `sqlalchemy.url` at the selected database and generate revision scripts.
+The application creates missing tables on startup for local compatibility. Production uses the Railway PostgreSQL `DATABASE_URL`; startup does not seed or reset data. Run `python seed.py` separately only for a development/demo database.
 
 ## Tests
 Backend: `cd backend; pytest`

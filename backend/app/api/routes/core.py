@@ -1399,6 +1399,9 @@ async def import_csv(
 
     imported = 0
     duplicates = 0
+    imported_records = []
+
+    run_id = f"IMP-{datetime.utcnow():%Y%m%d%H%M%S%f}"
 
     for r in rows:
 
@@ -1442,9 +1445,79 @@ async def import_csv(
         )
 
         db.add(t)
+        db.flush()
+
+        settlement_amount = t.settlement_amount
+        variance = (
+            abs(float(t.amount) - float(settlement_amount))
+            if settlement_amount is not None
+            else 0
+        )
+        status = (
+            "MATCHED"
+            if settlement_amount is not None and variance <= 1
+            else "MISMATCH"
+            if settlement_amount is not None
+            else "UNMATCHED"
+        )
+        reason = (
+            "Exact settlement match"
+            if status == "MATCHED"
+            else "Settlement variance detected"
+            if status == "MISMATCH"
+            else "No settlement amount supplied"
+        )
+        score, level, factors = calculate(t, variance, False, False)
+        db.add(RiskAssessment(
+            transaction_id=t.transaction_id,
+            risk_score=score,
+            risk_level=level,
+            risk_factors=json.dumps(factors + [run_marker(run_id)]),
+        ))
+        db.add(ReconciliationResult(
+            run_id=run_id,
+            transaction_id=t.transaction_id,
+            status=status,
+            variance=variance,
+            reason=reason,
+        ))
+        if status != "MATCHED":
+            db.add(ReviewItem(
+                run_id=run_id,
+                transaction_id=t.transaction_id,
+                note=reason,
+            ))
+        imported_records.append((status, variance))
 
         imported += 1
 
+    counts = classify_counts([{"status": status} for status, _ in imported_records])
+    db.add(ReconciliationRun(
+        run_id=run_id,
+        mode="import",
+        filename=file.filename or "finance.csv",
+        user_email=u.email,
+        bank_filename="",
+        ledger_filename="",
+        settlement_filename=None,
+        total=imported,
+        matched=counts["MATCHED"],
+        partial=counts["PARTIAL"],
+        unmatched=counts["UNMATCHED"],
+        duplicate=counts["DUPLICATE"],
+        exceptions=imported - counts["MATCHED"],
+        match_rate=(counts["MATCHED"] / imported * 100) if imported else 0,
+        total_variance=sum(variance for _, variance in imported_records),
+    ))
+    db.add(AuditLog(
+        user_email=u.email,
+        action="CSV_IMPORT",
+        entity=run_id,
+        detail=(
+            f"Run {run_id}; filename={file.filename}; imported={imported}; "
+            f"duplicates={duplicates}; total rows={len(rows)}"
+        ),
+    ))
     db.commit()
 
     return {
@@ -1452,6 +1525,7 @@ async def import_csv(
         "duplicates": duplicates,
         "errors": [],
         "warnings": [],
+        "run_id": run_id,
     }
 
 
