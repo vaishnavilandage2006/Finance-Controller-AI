@@ -46,19 +46,26 @@ def _financial_from_transactions(txns):
 def metrics(db):
     from ...models import Transaction, RiskAssessment, ReconciliationResult
     from ...models import ReconciliationRun
-    rows = db.query(Transaction).all()
-    revenue = sum(x.amount for x in rows if x.type.lower() in ("revenue", "income", "sale", "payment"))
-    expenses = sum(x.amount for x in rows if x.type.lower() in ("expense", "purchase", "payout"))
-    refunds = sum(x.refund_amount or 0 for x in rows)
-    fees = sum(x.fee or 0 for x in rows)
-    rec = db.query(ReconciliationResult).all()
+    transaction_count = db.query(func.count(Transaction.id)).scalar() or 0
+    revenue = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+        func.lower(Transaction.type).in_(REVENUE_TYPES)
+    ).scalar() or 0
+    expenses = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+        func.lower(Transaction.type).in_(EXPENSE_TYPES)
+    ).scalar() or 0
+    refunds = db.query(func.coalesce(func.sum(Transaction.refund_amount), 0)).scalar() or 0
+    fees = db.query(func.coalesce(func.sum(Transaction.fee), 0)).scalar() or 0
     latest_run = db.query(ReconciliationRun).filter(ReconciliationRun.status == "COMPLETED").order_by(ReconciliationRun.created_at.desc(), ReconciliationRun.id.desc()).first()
     if latest_run:
+        rec = db.query(ReconciliationResult).filter(
+            ReconciliationResult.run_id == latest_run.run_id
+        ).all()
         from ..risk.engine import run_marker
         risk_rows = db.query(RiskAssessment).filter(
             RiskAssessment.risk_factors.like("%" + run_marker(latest_run.run_id) + "%")
         ).all()
     else:
+        rec = db.query(ReconciliationResult).all()
         risk_rows = db.query(RiskAssessment).all()
     risks = sum(1 for r in risk_rows if (r.risk_score or 0) >= 61)
     if latest_run:
@@ -172,7 +179,7 @@ def metrics(db):
         "refunds": refunds,
         "fees": fees,
         "high_risk": risks,
-        "total_transactions": len(rows),
+        "total_transactions": transaction_count,
         "reconciliation_rate": reconciliation["match_rate"],
         "cash_balance": revenue - expenses - refunds - fees,
         "currency": "INR",
