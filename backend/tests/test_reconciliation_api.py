@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.core.security import hash_password
@@ -100,6 +100,37 @@ def test_multi_file_upload_creates_independent_runs(client):
     assert len({review.run_id for review in reviews}) == 2
     assert db.query(AuditLog).filter_by(action="MULTI_FILE_RECONCILIATION").count() == 2
     db.close()
+
+
+def test_multi_file_upload_avoids_per_row_selects(client):
+    test_client, session_factory = client
+    headers = auth_headers(test_client)
+    rows = "\n".join(f"R{index},{index + 100}" for index in range(100))
+    files = {
+        "bank_file": ("bank.csv", f"bank_reference,bank_amount\n{rows}\n".encode(), "text/csv"),
+        "ledger_file": ("ledger.csv", f"ledger_reference,ledger_amount\n{rows}\n".encode(), "text/csv"),
+    }
+    db = session_factory()
+    statements = []
+
+    def count_selects(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(db.bind, "before_cursor_execute", count_selects)
+    try:
+        response = test_client.post(
+            "/api/reconciliation/multi-file",
+            files=files,
+            headers=headers,
+        )
+    finally:
+        event.remove(db.bind, "before_cursor_execute", count_selects)
+        db.close()
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["total_records"] == 100
+    assert len(statements) <= 3
 
 
 def test_latest_reconciliation_and_review_are_run_scoped(client):

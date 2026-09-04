@@ -212,9 +212,10 @@ def _upsert_reconciliation_transaction(
     fee=0,
     currency="INR",
     existing=None,
+    lookup_if_missing=True,
 ):
     transaction = existing
-    if transaction is None:
+    if transaction is None and lookup_if_missing:
         transaction = (
             db.query(Transaction)
             .filter(Transaction.transaction_id == transaction_id)
@@ -345,6 +346,21 @@ def reconciliation(
         for x in reconciliation_rows
     )
 
+    transaction_map = _transactions_by_id(
+        db,
+        (row.transaction_id for row in reconciliation_rows),
+    )
+    review_map = {}
+    if reconciliation_rows:
+        run_ids = {row.run_id for row in reconciliation_rows}
+        review_rows = db.query(ReviewItem).filter(
+            ReviewItem.transaction_id.in_({row.transaction_id for row in reconciliation_rows}),
+            ReviewItem.run_id.in_(run_ids),
+        ).all()
+        review_map = {
+            (row.run_id, row.transaction_id): row
+            for row in review_rows
+        }
     records = []
 
     for x in reconciliation_rows:
@@ -353,28 +369,13 @@ def reconciliation(
         # Transaction
         # ----------------------------------------------------
 
-        transaction = (
-            db.query(Transaction)
-            .filter(
-                Transaction.transaction_id
-                == x.transaction_id
-            )
-            .first()
-        )
+        transaction = transaction_map.get(x.transaction_id)
 
         # ----------------------------------------------------
         # Review item
         # ----------------------------------------------------
 
-        review_item = (
-            db.query(ReviewItem)
-            .filter(
-                ReviewItem.run_id == x.run_id,
-                ReviewItem.transaction_id
-                == x.transaction_id
-            )
-            .first()
-        )
+        review_item = review_map.get((x.run_id, x.transaction_id))
 
         # ----------------------------------------------------
         # Build record
@@ -636,7 +637,7 @@ async def multi_file_reconciliation(
     exception_statuses = {"PARTIAL", "MISMATCH", "UNMATCHED", "DUPLICATE", "EXCEPTION"}
     transaction_map = _transactions_by_id(
         db,
-        record["reference"] for record in records,
+        (record["reference"] for record in records),
     )
     source_maps = {
         source: {
@@ -688,6 +689,7 @@ async def multi_file_reconciliation(
                 else "INR"
             ),
             existing=transaction_map.get(record["reference"]),
+            lookup_if_missing=False,
         )
         db.add(ReconciliationResult(
             run_id=run_id,
@@ -818,6 +820,10 @@ async def single_file_reconciliation(
     variance = round(sum(record["variance"] for record in records), 2)
     match_rate = round(matched / total * 100, 2) if total else 0
     run_id = f"REC-{datetime.utcnow():%Y%m%d%H%M%S%f}"
+    transaction_map = _transactions_by_id(
+        db,
+        (record["reference"] for record in records),
+    )
 
     for record in records:
         amount = next(
@@ -832,7 +838,7 @@ async def single_file_reconciliation(
             ),
             0,
         )
-        _upsert_reconciliation_transaction(
+        transaction = _upsert_reconciliation_transaction(
             db,
             record["reference"],
             amount,
@@ -840,15 +846,17 @@ async def single_file_reconciliation(
             record["date"].isoformat() if record.get("date") else None,
             record.get("vendor"),
             record.get("vendor"),
+            existing=transaction_map.get(record["reference"]),
+            lookup_if_missing=False,
         )
-        _upsert_reconciliation_result(
-            db,
-            run_id,
-            record["reference"],
-            record["status"],
-            record["variance"],
-            record["reason"],
-        )
+        transaction_map[record["reference"]] = transaction
+        db.add(ReconciliationResult(
+            run_id=run_id,
+            transaction_id=record["reference"],
+            status=record["status"],
+            variance=float(record["variance"] or 0),
+            reason=record["reason"] or "",
+        ))
 
     db.add(ReconciliationRun(
         run_id=run_id,
@@ -869,7 +877,12 @@ async def single_file_reconciliation(
     ))
     for record in records:
         if record["status"] in {"PARTIAL", "MISMATCH", "UNMATCHED", "DUPLICATE", "EXCEPTION"}:
-            _upsert_review_item(db, run_id, record["reference"], record["reason"])
+            db.add(ReviewItem(
+                run_id=run_id,
+                transaction_id=record["reference"],
+                status="OPEN",
+                note=record["reason"],
+            ))
     db.add(AuditLog(
         user_email=u.email,
         action="SINGLE_FILE_RECONCILIATION",
@@ -1404,18 +1417,16 @@ async def import_csv(
     imported = 0
     duplicates = 0
     imported_records = []
+    existing_transactions = _transactions_by_id(
+        db,
+        (row["transaction_id"] for row in rows),
+    )
 
     run_id = f"IMP-{datetime.utcnow():%Y%m%d%H%M%S%f}"
 
     for r in rows:
 
-        if (
-            db.query(Transaction)
-            .filter_by(
-                transaction_id=r["transaction_id"]
-            )
-            .first()
-        ):
+        if r["transaction_id"] in existing_transactions:
             duplicates += 1
             continue
 
@@ -1449,7 +1460,7 @@ async def import_csv(
         )
 
         db.add(t)
-        db.flush()
+        existing_transactions[t.transaction_id] = t
 
         settlement_amount = t.settlement_amount
         variance = (

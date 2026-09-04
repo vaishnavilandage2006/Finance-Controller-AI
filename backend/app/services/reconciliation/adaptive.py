@@ -214,16 +214,35 @@ def _multi_result(reference: str, grouped: dict[str, list[CanonicalRecord]], set
 def reconcile_sources(bank_records: list[CanonicalRecord], ledger_records: list[CanonicalRecord], settlement_records: list[CanonicalRecord]) -> list[dict[str, Any]]:
     all_records = bank_records + ledger_records + settlement_records; groups = defaultdict(lambda: defaultdict(list))
     for record in all_records: groups[record.reference.strip().lower()][record.source].append(record)
+    match_index = defaultdict(set)
+    for group_key, group in groups.items():
+        if not all(len(values) == 1 for values in group.values()):
+            continue
+        for values in group.values():
+            record = values[0]
+            amount_cents = round(record.amount * 100)
+            for source in ("BANK", "LEDGER", "SETTLEMENT"):
+                if source not in group:
+                    for candidate_cents in (amount_cents - 1, amount_cents, amount_cents + 1):
+                        match_index[(source, candidate_cents)].add(group_key)
     for records in (bank_records, ledger_records, settlement_records):
         for record in records:
             key = record.reference.strip().lower()
             if key not in groups or len(groups[key].get(record.source, [])) != 1:
                 continue
+            if len(groups[key]) > 1:
+                continue
+            amount_cents = round(record.amount * 100)
             candidates = [
-                group for group in groups.values()
-                if group.get(record.source) is None
-                and all(len(values) == 1 for values in group.values())
-                and any(_compatible(record, other) for values in group.values() for other in values)
+                groups[group_key] for group_key in {
+                    candidate_key
+                    for candidate_cents in (amount_cents - 1, amount_cents, amount_cents + 1)
+                    for candidate_key in match_index.get((record.source, candidate_cents), ())
+                    if candidate_key in groups
+                }
+                if groups[group_key].get(record.source) is None
+                and all(len(values) == 1 for values in groups[group_key].values())
+                and any(_compatible(record, other) for values in groups[group_key].values() for other in values)
             ]
             if len(candidates) == 1:
                 target = candidates[0]; del groups[key]; target[record.source].append(record)
