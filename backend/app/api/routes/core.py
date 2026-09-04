@@ -15,6 +15,14 @@ from ...services.risk.engine import (
     split_run_marker,
 )
 from ...services.ai.providers import get_provider
+from ...services.ai.context import (
+    authorized_scope_text,
+    capabilities_for,
+    role_tier,
+    scope_ai_context,
+    tier_label,
+)
+from ...services.anomaly.engine import analyze_transactions
 from ...core.config import settings
 from ...services.csv.processor import validate_csv
 from ...services.reconciliation.adaptive import (
@@ -303,8 +311,12 @@ def _upsert_reconciliation_transaction(
         db.add(transaction)
         return transaction
 
-    if transaction.settlement_amount is None and settlement_amount is not None:
-        transaction.settlement_amount = float(settlement_amount)
+    transaction.settlement_amount = (
+        float(settlement_amount)
+        if settlement_amount is not None
+        else None
+    )
+    transaction.amount = float(amount)
     if transaction.date is None and date_value is not None:
         transaction.date = date_value
     if transaction.vendor is None and (vendor or description):
@@ -616,8 +628,24 @@ async def multi_file_reconciliation(
     role_details = {}
     occupied_roles = set()
     for slot, upload in uploads:
+        if (upload.size or 0) > 20 * 1024 * 1024:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "source": slot,
+                    "error": "CSV exceeds the 20 MB upload limit",
+                },
+            )
         try:
             data = await upload.read()
+            if len(data) > 20 * 1024 * 1024:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "source": slot,
+                        "error": "CSV exceeds the 20 MB upload limit",
+                    },
+                )
             mapping = detect_mapping_from_bytes(data, slot)
             role = detect_source_role(list(mapping.values()), upload.filename or "")
             detected_role = role["role"]
@@ -854,8 +882,19 @@ async def single_file_reconciliation(
             status_code=400,
             detail="Only CSV files are accepted",
         )
+    if (file.size or 0) > 20 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV exceeds the 20 MB upload limit",
+        )
+    data = await file.read()
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="CSV exceeds the 20 MB upload limit",
+        )
     try:
-        records, mapping = parse_single_file(await file.read())
+        records, mapping = parse_single_file(data)
     except MultiFileValidationError as error:
         raise HTTPException(status_code=400, detail=error.as_dict())
 
@@ -890,6 +929,7 @@ async def single_file_reconciliation(
             (
                 record.get(field)
                 for field in (
+                    "amount",
                     "bank_amount",
                     "ledger_amount",
                     "settlement_amount",
@@ -1477,6 +1517,7 @@ async def import_csv(
     imported = 0
     duplicates = 0
     imported_records = []
+    imported_objects = []
     existing_transactions = _transactions_by_id(
         db,
         (row["transaction_id"] for row in rows),
@@ -1521,6 +1562,7 @@ async def import_csv(
 
         db.add(t)
         existing_transactions[t.transaction_id] = t
+        imported_objects.append(t)
 
         settlement_amount = t.settlement_amount
         variance = (
@@ -1566,6 +1608,40 @@ async def import_csv(
 
         imported += 1
 
+    # -------------------------------------------------
+    # Independent statistical anomaly detection.
+    # Run on the imported dataset only: median/MAD robust
+    # baselines, repeated/concentration/refund/fee checks.
+    # A transaction can be matched AND anomalous, or an
+    # exception and NOT statistically anomalous - these
+    # are separate control signals, kept separate here.
+    # -------------------------------------------------
+
+    statistical_anomalies = []
+
+    if imported_objects:
+        analysis = analyze_transactions(
+            imported_objects
+        )
+        for anomaly in analysis["anomalies"]:
+            db.add(Anomaly(
+                transaction_id=anomaly["transaction_id"],
+                reason=anomaly["reason"],
+                severity=anomaly["severity"],
+                score=float(anomaly["score"] or 0),
+                evidence=(
+                    f"Run {run_id}; "
+                    f"{anomaly.get('method', '')}; "
+                    f"{anomaly.get('evidence', '')}"
+                ),
+            ))
+            statistical_anomalies.append({
+                "transaction_id": anomaly["transaction_id"],
+                "reason": anomaly["reason"],
+                "severity": anomaly["severity"],
+                "score": anomaly["score"],
+            })
+
     counts = classify_counts([{"status": status} for status, _ in imported_records])
     db.add(ReconciliationRun(
         run_id=run_id,
@@ -1590,7 +1666,8 @@ async def import_csv(
         entity=run_id,
         detail=(
             f"Run {run_id}; filename={file.filename}; imported={imported}; "
-            f"duplicates={duplicates}; total rows={len(rows)}"
+            f"duplicates={duplicates}; total rows={len(rows)}; "
+            f"statistical_anomalies={len(statistical_anomalies)}"
         ),
     ))
     db.commit()
@@ -1601,6 +1678,7 @@ async def import_csv(
         "errors": [],
         "warnings": [],
         "run_id": run_id,
+        "statistical_anomalies": statistical_anomalies,
     }
 
 
@@ -1608,36 +1686,171 @@ async def import_csv(
 # FORECAST
 # ============================================================
 
+def _forecast_payload(db, m):
+    """Transparent, time-based baseline forecast shared by /forecast and the
+    CFO command center. Deterministic and fully backend-calculated.
+
+    Daily revenue/expense/refund/fee totals are derived from the dated
+    transactions actually stored. Each series is projected over a fixed
+    30-day horizon using the trailing daily average plus a linear
+    (least-squares) trend on the observed daily totals:
+
+        forecast_total = horizon * daily_average
+                         + daily_trend * horizon * (horizon + 1) / 2
+
+    No confidence intervals are fabricated. Series with no dated data are
+    reported as unavailable instead of showing invented values.
+    """
+    import datetime as _dt
+    from collections import defaultdict
+
+    HORIZON_DAYS = 30
+    revenue_types = ("revenue", "income", "sale", "payment")
+    expense_types = ("expense", "purchase", "payout")
+
+    if m["total_transactions"] < 30:
+        return {
+            "message": "Insufficient historical data for reliable forecasting.",
+            "available": False,
+            "method": (
+                "time-based daily baseline (trailing daily totals + linear "
+                "trend); requires at least 30 dated transactions"
+            ),
+        }
+
+    dated_transactions = (
+        db.query(Transaction)
+        .filter(Transaction.date.isnot(None))
+        .all()
+    )
+
+    daily = {
+        "revenue": defaultdict(float),
+        "expenses": defaultdict(float),
+        "refunds": defaultdict(float),
+        "fees": defaultdict(float),
+    }
+
+    for txn in dated_transactions:
+        try:
+            day = _dt.date.fromisoformat(str(txn.date)[:10])
+        except ValueError:
+            continue
+        type_key = str(txn.type or "").lower()
+        amount = float(txn.amount or 0)
+        if type_key in revenue_types:
+            daily["revenue"][day] += amount
+        elif type_key in expense_types:
+            daily["expenses"][day] += amount
+        # Zero-valued refund/fee rows do not constitute a refund/fee series:
+        # a series with no non-zero observations is reported unavailable.
+        refund_value = float(txn.refund_amount or 0)
+        fee_value = float(txn.fee or 0)
+        if refund_value:
+            daily["refunds"][day] += refund_value
+        if fee_value:
+            daily["fees"][day] += fee_value
+
+    def _project(series):
+        if not series:
+            return {
+                "available": False,
+                "reason": "No dated transactions carry this series.",
+            }
+        days = sorted(series)
+        last_day = days[-1]
+        window_start = last_day - _dt.timedelta(days=90)
+        window = {
+            day: value
+            for day, value in series.items()
+            if day >= window_start
+        }
+        if not window:
+            window = series
+        ordered_days = sorted(window)
+        values = [window[day] for day in ordered_days]
+        count = len(values)
+        daily_average = sum(values) / count
+        slope = 0.0
+        if count >= 2:
+            mean_x = (count - 1) / 2
+            denominator = sum(
+                (index - mean_x) ** 2
+                for index in range(count)
+            )
+            if denominator > 0:
+                slope = sum(
+                    (index - mean_x)
+                    * (window[ordered_days[index]] - daily_average)
+                    for index in range(count)
+                ) / denominator
+        total = (
+            HORIZON_DAYS * daily_average
+            + slope * HORIZON_DAYS * (HORIZON_DAYS + 1) / 2
+        )
+        return {
+            "available": True,
+            "historical_start": ordered_days[0].isoformat(),
+            "historical_end": last_day.isoformat(),
+            "historical_days_observed": count,
+            "daily_average": round(daily_average, 2),
+            "daily_trend": round(slope, 2),
+            "horizon_days": HORIZON_DAYS,
+            "forecast_total": round(max(total, 0.0), 2),
+        }
+
+    series = {
+        key: _project(daily[key])
+        for key in ("revenue", "expenses", "refunds", "fees")
+    }
+
+    revenue_projected = series["revenue"]["forecast_total"] if series["revenue"]["available"] else None
+    expense_projected = series["expenses"]["forecast_total"] if series["expenses"]["available"] else None
+
+    cash_available = series["revenue"]["available"] and series["expenses"]["available"]
+    cash_flow = 0.0
+    if cash_available:
+        cash_flow = (revenue_projected or 0) - (expense_projected or 0)
+        if series["refunds"]["available"]:
+            cash_flow -= series["refunds"]["forecast_total"]
+        if series["fees"]["available"]:
+            cash_flow -= series["fees"]["forecast_total"]
+
+    method = (
+        "time-based daily baseline over the trailing 90 days of dated "
+        f"transactions; {HORIZON_DAYS}-day horizon; no fabricated confidence intervals"
+    )
+
+    return {
+        "available": True,
+        "method": method,
+        "horizon_days": HORIZON_DAYS,
+        "series": series,
+        "revenue_forecast": (
+            round(revenue_projected, 2)
+            if revenue_projected is not None
+            else None
+        ),
+        "expense_forecast": (
+            round(expense_projected, 2)
+            if expense_projected is not None
+            else None
+        ),
+        "cash_flow_forecast": (
+            round(cash_flow, 2)
+            if cash_available
+            else None
+        ),
+    }
+
+
 @router.get("/forecast")
 def forecast(
     db: Session = Depends(get_db),
     u=Depends(current_user)
 ):
-
-    m = metrics(db)
-
-    if m["total_transactions"] < 30:
-        return {
-            "message":
-            "Insufficient historical data for reliable forecasting."
-        }
-
-    return {
-        "revenue_forecast":
-            round(m["revenue"] * 1.05, 2),
-
-        "expense_forecast":
-            round(m["expenses"] * 1.03, 2),
-
-        "cash_flow_forecast":
-            round(
-                (m["revenue"] - m["expenses"]) * 1.05,
-                2
-            ),
-
-        "method":
-            "baseline historical trend",
-    }
+    """Forecast endpoint backed by the shared deterministic helper."""
+    return _forecast_payload(db, metrics(db))
 
 
 # ============================================================
@@ -1652,33 +1865,43 @@ class Scenario(BaseModel):
     fee_change: float = 0
 
 
-@router.post("/scenarios")
-def scenario(
-    b: Scenario,
-    db: Session = Depends(get_db),
-    u=Depends(current_user)
+def _project_scenario(
+    m,
+    revenue_change=0.0,
+    expense_change=0.0,
+    refund_change=0.0,
+    fee_change=0.0,
+    volume_change=0.0,
 ):
-
-    m = metrics(db)
+    """Deterministic scenario projection shared by /scenarios and the CFO
+    command center. volume_change scales every money movement (transaction
+    volume); per-category changes then apply on top."""
+    volume_factor = (
+        1 + volume_change / 100
+    )
 
     rev = (
         m["revenue"]
-        * (1 + b.revenue_change / 100)
+        * volume_factor
+        * (1 + revenue_change / 100)
     )
 
     exp = (
         m["expenses"]
-        * (1 + b.expense_change / 100)
+        * volume_factor
+        * (1 + expense_change / 100)
     )
 
     refunds = (
         m["refunds"]
-        * (1 + b.refund_change / 100)
+        * volume_factor
+        * (1 + refund_change / 100)
     )
 
     fees = (
         m["fees"]
-        * (1 + b.fee_change / 100)
+        * volume_factor
+        * (1 + fee_change / 100)
     )
 
     profit = (
@@ -1697,6 +1920,13 @@ def scenario(
 
         "projected_profit":
             round(profit, 2),
+
+        "volume_change_applied":
+            volume_change != 0,
+
+        "simulation_note":
+            "Simulation only: deterministic calculation on current financial "
+            "data, not a forecast or a guaranteed outcome.",
 
         "projected_margin":
             round(
@@ -1719,6 +1949,25 @@ def scenario(
     }
 
 
+@router.post("/scenarios")
+def scenario(
+    b: Scenario,
+    db: Session = Depends(get_db),
+    u=Depends(current_user)
+):
+
+    m = metrics(db)
+
+    return _project_scenario(
+        m,
+        revenue_change=b.revenue_change,
+        expense_change=b.expense_change,
+        refund_change=b.refund_change,
+        fee_change=b.fee_change,
+        volume_change=b.volume_change,
+    )
+
+
 # ============================================================
 # CFO REPORT
 # ============================================================
@@ -1728,6 +1977,14 @@ def cfo_report(
     db: Session = Depends(get_db),
     u=Depends(current_user)
 ):
+    # Role gate: the executive control view is a management/controller
+    # surface. Backend RBAC stays the source of truth.
+    if role_tier(u.role) not in ("cfo", "manager"):
+        raise HTTPException(
+            status_code=403,
+            detail="CFO report access requires a controller or manager role",
+        )
+
     from sqlalchemy import case
 
     revenue_types = ("revenue", "income", "sale", "payment")
@@ -1744,6 +2001,99 @@ def cfo_report(
         func.count(Transaction.id).label("count"),
     ).filter(type_name.in_(expense_types)).group_by(Transaction.type).order_by(func.sum(Transaction.amount).desc()).all()
     report_metrics = metrics(db)
+
+    current_run_id = report_metrics.get("reconciliation", {}).get("run_id")
+
+    # -------------------------------------------------------
+    # Independent anomaly summary (single run-scoped query)
+    # -------------------------------------------------------
+    anomaly_query = db.query(Anomaly)
+    if current_run_id:
+        anomaly_query = anomaly_query.filter(
+            Anomaly.evidence.like(f"%Run {current_run_id}%")
+        )
+    anomaly_rows = (
+        anomaly_query
+        .order_by(Anomaly.score.desc())
+        .limit(100)
+        .all()
+    )
+    anomaly_by_severity: dict[str, int] = {}
+    for row in anomaly_rows:
+        level = str(row.severity or "UNKNOWN").upper()
+        anomaly_by_severity[level] = anomaly_by_severity.get(level, 0) + 1
+
+    # -------------------------------------------------------
+    # Review workload (single aggregated query, no N+1)
+    # -------------------------------------------------------
+    review_query = (
+        db.query(ReviewItem.status, func.count(ReviewItem.id))
+        .group_by(ReviewItem.status)
+    )
+    if current_run_id:
+        review_query = review_query.filter(ReviewItem.run_id == current_run_id)
+    else:
+        review_query = review_query.filter(ReviewItem.run_id.is_(None))
+    review_by_status = {
+        str(status or "UNKNOWN"): int(count or 0)
+        for status, count in review_query.all()
+    }
+
+    # -------------------------------------------------------
+    # Deterministic outlook + reference scenarios
+    # -------------------------------------------------------
+    forecast_payload = _forecast_payload(db, report_metrics)
+    scenario_payload = {
+        "reference_scenarios": [
+            {
+                "label": "Revenue -10%",
+                "description": "What if revenue fell 10%?",
+                **_project_scenario(report_metrics, revenue_change=-10),
+            },
+            {
+                "label": "Expenses +10%",
+                "description": "What if expenses rose 10%?",
+                **_project_scenario(report_metrics, expense_change=10),
+            },
+            {
+                "label": "Volume +10%",
+                "description": "What if transaction volume rose 10%?",
+                **_project_scenario(report_metrics, volume_change=10),
+            },
+        ],
+        "note": (
+            "Reference simulations are deterministic calculations on current "
+            "backend data - not forecasts or guaranteed outcomes."
+        ),
+    }
+
+    # -------------------------------------------------------
+    # Alerts / control signals
+    # -------------------------------------------------------
+    control_alerts = _control_alerts(report_metrics)
+
+    # -------------------------------------------------------
+    # Audit/control trail (latest 10, aggregated single query)
+    # -------------------------------------------------------
+    audit_trail = [
+        {
+            "action": row.action,
+            "user": row.user_email,
+            "entity": row.entity,
+            "detail": row.detail,
+            "created_at": (
+                row.created_at.isoformat()
+                if row.created_at
+                else None
+            ),
+        }
+        for row in (
+            db.query(AuditLog)
+            .order_by(AuditLog.id.desc())
+            .limit(10)
+            .all()
+        )
+    ]
 
     return {
         "title": "CFO Executive Report",
@@ -1775,6 +2125,42 @@ def cfo_report(
 
         "data_note":
             "Accounting measures not supported by the source CSV are marked Insufficient source data.",
+
+        # ---- additive unified control context (backward compatible) ----
+        "anomalies": {
+            "total": len(anomaly_rows),
+            "by_severity": anomaly_by_severity,
+            "recent": [
+                {
+                    "transaction_id": row.transaction_id,
+                    "reason": row.reason,
+                    "severity": row.severity,
+                    "score": row.score,
+                }
+                for row in anomaly_rows[:10]
+            ],
+        },
+        "review_workload": {
+            "total": sum(review_by_status.values()),
+            "open": review_by_status.get("OPEN", 0),
+            "attention": sum(
+                review_by_status.get(status, 0)
+                for status in ("OPEN", "UNDER_REVIEW", "ESCALATED")
+            ),
+            "by_status": review_by_status,
+        },
+        "alerts": control_alerts,
+        "forecast": forecast_payload,
+        "scenario_insights": scenario_payload,
+        "audit_trail": audit_trail,
+        "control_context": {
+            "run_id": current_run_id,
+            "generated_at": datetime.utcnow().isoformat(),
+            "trace_note": (
+                "All figures derive from backend-controlled reconciliation, "
+                "risk, anomaly, forecast, scenario and audit data."
+            ),
+        },
     }
 
 
@@ -1782,14 +2168,8 @@ def cfo_report(
 # ALERTS
 # ============================================================
 
-@router.get("/alerts")
-def alerts(
-    db: Session = Depends(get_db),
-    u=Depends(current_user)
-):
-
-    m = metrics(db)
-
+def _control_alerts(m):
+    """Deterministic control alerts shared by /alerts and the CFO report."""
     out = []
 
     if m["high_risk"]:
@@ -1811,6 +2191,14 @@ def alerts(
         )
 
     return out
+
+
+@router.get("/alerts")
+def alerts(
+    db: Session = Depends(get_db),
+    u=Depends(current_user)
+):
+    return _control_alerts(metrics(db))
 
 
 # ============================================================
@@ -2046,6 +2434,33 @@ def copilot(
         })
 
     # -------------------------------------------------
+    # Statistical anomaly context (independent engine)
+    # -------------------------------------------------
+
+    anomaly_query = db.query(Anomaly)
+    if current_run_id:
+        anomaly_query = anomaly_query.filter(
+            Anomaly.evidence.like(f"%Run {current_run_id}%")
+        )
+    anomaly_rows = (
+        anomaly_query
+        .order_by(Anomaly.score.desc())
+        .limit(25)
+        .all()
+    )
+
+    m["anomaly_records"] = [
+        {
+            "transaction_id": x.transaction_id,
+            "reason": x.reason,
+            "severity": x.severity,
+            "score": x.score,
+            "evidence": x.evidence,
+        }
+        for x in anomaly_rows
+    ]
+
+    # -------------------------------------------------
     # Merge run-scoped risk into reconciliation records
     # -------------------------------------------------
 
@@ -2073,6 +2488,31 @@ def copilot(
 
     m["review_records"] = review_context
 
+    # -------------------------------------------------
+    # Role-aware AI context scoping (server-side RBAC)
+    # -------------------------------------------------
+
+    tier = role_tier(u.role)
+
+    review_count_query = db.query(ReviewItem).filter(
+        ReviewItem.status == "OPEN"
+    )
+    if current_run_id:
+        review_count_query = review_count_query.filter(
+            ReviewItem.run_id == current_run_id
+        )
+    open_review_count = review_count_query.count()
+
+    ai_context = scope_ai_context(m, tier)
+    ai_context["user"] = {
+        "role": u.role,
+        "tier": tier,
+        "label": tier_label(tier),
+        "scope_text": authorized_scope_text(tier),
+        "capabilities": sorted(capabilities_for(tier)),
+        "open_review_count": open_review_count,
+    }
+
     provider_key = settings.ai_api_key
     provider_model = None
     if settings.ai_provider.lower() == "openai":
@@ -2088,8 +2528,21 @@ def copilot(
         provider_model,
     ).answer(
         b.question,
-        m
+        ai_context
     )
+
+    db.add(
+        AuditLog(
+            user_email=u.email,
+            action="COPILOT_QUERY",
+            entity=current_run_id or "copilot",
+            detail=(
+                f"role={u.role}; tier={tier}; "
+                f"question={b.question[:300]}"
+            ),
+        )
+    )
+    db.commit()
 
     disclosure = (
         "Financial calculations and risk metrics are generated "

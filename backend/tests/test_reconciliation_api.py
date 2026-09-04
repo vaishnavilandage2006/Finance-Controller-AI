@@ -196,6 +196,54 @@ def test_single_file_upload_allows_missing_date_and_creates_audit(client):
     db.close()
 
 
+def test_repeated_single_file_upload_refreshes_latest_amount_and_settlement(client):
+    test_client, session_factory = client
+    headers = auth_headers(test_client)
+
+    first = test_client.post(
+        "/api/reconciliation/single-file",
+        files={"file": ("values.csv", b"reference,amount,settlement_amount\nR1,100,90\n", "text/csv")},
+        headers=headers,
+    )
+    second = test_client.post(
+        "/api/reconciliation/single-file",
+        files={"file": ("values.csv", b"reference,amount,settlement_amount\nR1,250,125\n", "text/csv")},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["records"][0]["variance"] == 125
+
+    db = session_factory()
+    transaction = db.query(Transaction).filter_by(transaction_id="R1").one()
+    latest_run = (
+        db.query(ReconciliationRun)
+        .order_by(ReconciliationRun.id.desc())
+        .first()
+    )
+    result = (
+        db.query(ReconciliationResult)
+        .filter_by(run_id=latest_run.run_id, transaction_id="R1")
+        .one()
+    )
+    assert transaction.amount == 250
+    assert transaction.settlement_amount == 125
+    assert result.variance == 125
+    assert db.query(ReconciliationRun).count() == 2
+    db.close()
+
+    latest_view = test_client.get(
+        f"/api/reconciliation?run_id={latest_run.run_id}",
+        headers=headers,
+    )
+    assert latest_view.status_code == 200
+    latest_record = latest_view.json()["records"][0]
+    assert latest_record["amount"] == 250
+    assert latest_record["settlement_amount"] == 125
+    assert latest_record["variance"] == 125
+
+
 def test_single_file_api_reconciles_generic_settled_value_schema(client):
     test_client, _ = client
     mismatches = [50] * 39 + [1625]

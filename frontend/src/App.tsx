@@ -28,6 +28,13 @@ import {
 
 const API = `${import.meta.env.VITE_API_URL || ""}/api`;
 
+// Demo-login prefill. Local development supplies VITE_DEMO_EMAIL /
+// VITE_DEMO_PASSWORD via frontend/.env.development so the credential is
+// never bundled into production builds. Deployments that want a prefill
+// must provide their own values via VITE_* environment variables.
+const DEMO_EMAIL = import.meta.env.VITE_DEMO_EMAIL || "admin@demo.com";
+const DEMO_PASSWORD = import.meta.env.VITE_DEMO_PASSWORD || "";
+
 /* =========================================================
    API HELPERS
 ========================================================= */
@@ -419,12 +426,12 @@ function Login() {
 
   const [email, setEmail] =
     useState(
-      "admin@demo.com"
+      DEMO_EMAIL
     );
 
   const [password, setPassword] =
     useState(
-      "DemoPassword123!"
+      DEMO_PASSWORD
     );
 
   const [error, setError] =
@@ -6140,6 +6147,21 @@ function CfoCommandCenter() {
     Number(metrics.largest_variance || 0) > 0 ? { tone: "warning", title: "Largest variance requires review", detail: "The current run contains a material reconciliation variance.", amount: currency(Number(metrics.largest_variance || 0)), action: "Open reconciliation", onClick: () => navigate("/reconciliation") } : null,
   ].filter(Boolean) as any[];
 
+  const num = (value: any) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : 0;
+  };
+  const anomalies = report?.anomalies || {};
+  const anomalyItems = Array.isArray(anomalies.recent) ? anomalies.recent : [];
+  const reviewWorkload = report?.review_workload || {};
+  const reviewByStatus = reviewWorkload.by_status || {};
+  const alertsList = Array.isArray(report?.alerts) ? report.alerts : [];
+  const forecastBlock = report?.forecast || {};
+  const forecastSeries = forecastBlock.series || {};
+  const scenarioBlock = report?.scenario_insights || {};
+  const scenarioRows = Array.isArray(scenarioBlock.reference_scenarios) ? scenarioBlock.reference_scenarios : [];
+  const auditItems = Array.isArray(report?.audit_trail) ? report.audit_trail : [];
+
   return (
     <div className="cfo-command-center">
       <header>
@@ -6163,6 +6185,19 @@ function CfoCommandCenter() {
       </section>
 
       <section className="cfo-attention"><div className="cfo-section-heading"><div><h2>CFO attention required</h2><p>Prioritized from current risk and reconciliation data.</p></div><button type="button" style={secondaryButton} onClick={() => navigate("/analytics")}>Open analytics</button></div>{attention.length ? <div className="cfo-issues">{attention.map((issue) => <div className={`cfo-issue ${issue.tone}`} key={issue.title}><div className="cfo-issue-marker" /><div className="cfo-issue-copy"><strong>{issue.title}</strong><span>{issue.detail}</span></div><b>{issue.amount}</b><button type="button" style={secondaryButton} onClick={issue.onClick}>{issue.action}</button></div>)}</div> : <div className="cfo-empty">No unresolved control issues are recorded for the current data.</div>}</section>
+
+      <section className="cfo-chart-grid">
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Independent anomalies</h2><p>Statistical and control signals from the current run</p></div></div>{anomalyItems.length ? <div>{anomalyItems.slice(0, 6).map((item: any) => <div className="cfo-bar-row" key={`${item.transaction_id}-${item.score}`}><div><span>{item.transaction_id}</span><strong>{item.severity} · {num(item.score).toFixed(0)}/100</strong></div><div className="cfo-bar-track"><i style={{ width: `${Math.min(100, num(item.score))}%` }} /></div><small style={{ color: "#64748b", fontSize: 12 }}>{item.reason}</small></div>)}</div> : <div className="cfo-empty">No independent anomalies are recorded for the current run.</div>}</div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Review workload</h2><p>Items requiring a human decision</p></div></div><div className="cfo-health"><div className="cfo-health-ring" style={{ background: `conic-gradient(#c2413b ${Math.min(100, num(reviewWorkload.total) ? num(reviewWorkload.attention) / num(reviewWorkload.total) * 100 : 0)}%, #e8edf3 0)` }}><div><strong>{num(reviewWorkload.attention)}</strong><small>attention</small></div></div><div className="cfo-health-legend"><span><i className="matched" />Open <b>{num(reviewWorkload.open)}</b></span><span><i className="unmatched" />Total <b>{num(reviewWorkload.total)}</b></span></div></div>{Object.keys(reviewByStatus).length ? <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>{Object.entries(reviewByStatus).map(([status, count]: any) => <span key={status} style={{ padding: "4px 10px", borderRadius: 12, background: "#f1f5f9", fontSize: 12 }}>{status}: {count}</span>)}</div> : null}</div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Alerts & control</h2><p>Deterministic control signals</p></div></div>{alertsList.length ? alertsList.map((alert: any, index: number) => <div key={index} style={{ display: "flex", gap: 10, alignItems: "center", padding: "10px 12px", marginBottom: 8, borderRadius: 10, background: alert.severity === "HIGH" ? "#fef2f2" : "#fffbeb", border: `1px solid ${alert.severity === "HIGH" ? "#fecaca" : "#fde68a"}` }}><b style={{ color: alert.severity === "HIGH" ? "#b91c1c" : "#b45309", fontSize: 12 }}>{alert.severity}</b><span style={{ fontSize: 13, color: "#334155" }}>{alert.message}</span></div>) : <div className="cfo-empty">No control alerts are currently active.</div>}</div>
+      </section>
+
+      <section className="cfo-chart-grid">
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Financial outlook</h2><p>30-day deterministic baseline (no fabricated confidence)</p></div></div>{forecastBlock.available === false ? <div className="cfo-empty">{forecastBlock.message || "Forecast unavailable for the current data."}</div> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>{["revenue", "expenses", "refunds", "fees"].map((key) => { const series = forecastSeries[key]; return <div key={key} style={{ padding: 12, borderRadius: 10, background: "#f8fafc", border: "1px solid #e7edf5" }}><small style={{ textTransform: "capitalize", fontSize: 12 }}>{key}</small><strong style={{ display: "block", fontSize: 16, marginTop: 4 }}>{series && series.available ? currency(num(series.forecast_total)) : "Unavailable"}</strong><small style={{ color: "#94a3b8", fontSize: 11 }}>{series && series.available ? `${series.historical_days_observed} days observed` : (series && series.reason) || "No dated data"}</small></div>; })}</div>}{forecastBlock.method ? <p style={{ fontSize: 12, opacity: 0.6, margin: "10px 0 0" }}>{forecastBlock.method}</p> : null}</div>
+        <div className="panel cfo-chart-panel"><div className="cfo-panel-heading"><div><h2>Scenario insights</h2><p>Reference simulations on current data</p></div></div>{scenarioRows.length ? scenarioRows.map((row: any) => <div className="cfo-bar-row" key={row.label}><div><span>{row.label}</span><small style={{ display: "block", opacity: 0.6 }}>{row.description}</small></div><strong>{currency(num(row.projected_profit))}</strong></div>) : <div className="cfo-empty">No reference scenarios are available.</div>}{scenarioBlock.note ? <p style={{ fontSize: 12, opacity: 0.6, margin: "10px 0 0" }}>{scenarioBlock.note}</p> : null}</div>
+      </section>
+
+      <section className="panel"><div className="cfo-panel-heading"><div><h2>Audit / control trail</h2><p>Traceable to backend control and audit data</p></div></div>{auditItems.length ? <div style={{ maxHeight: 260, overflowY: "auto" }}>{auditItems.map((entry: any, index: number) => <div key={index} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: "1px solid #eef2f7", fontSize: 13, alignItems: "center" }}><span style={{ minWidth: 180, fontWeight: 700, color: "#1e56a0" }}>{entry.action}</span><span style={{ color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(entry.detail || "")}</span><span style={{ color: "#94a3b8", marginLeft: "auto", whiteSpace: "nowrap" }}>{entry.created_at ? new Date(entry.created_at).toLocaleString() : ""}</span></div>)}</div> : <div className="cfo-empty">No audit events are recorded yet.</div>}</section>
 
       <section className="cfo-takeaway"><div><span className="cfo-eyebrow">CFO TAKEAWAY</span><h2>Decision-ready summary</h2><div className="cfo-takeaway-metrics"><span>Revenue <b>{currency(revenue)}</b></span><span>Expenses <b>{currency(expense)}</b></span><span>Risk exposure <b>{currency(riskExposure)}</b></span><span>Unresolved <b>{unresolved}</b></span></div><p><strong>DECISION:</strong> {unresolved || Number(metrics.high_risk || 0) ? "Prioritize unresolved reconciliation and risk items before approving the current financial position." : "The current data shows no unresolved control issues requiring immediate escalation."}</p></div><button type="button" style={primaryButton} onClick={() => navigate("/reconciliation")}>Review current controls</button></section>
     </div>
@@ -6253,6 +6288,18 @@ function Copilot() {
 
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
+
+  let userRole = "";
+
+  try {
+    const stored = localStorage.getItem("user");
+
+    if (stored) {
+      userRole = JSON.parse(stored).role || "";
+    }
+  } catch {
+    userRole = "";
+  }
 
   const quickQuestions = [
     "What should I do first?",
@@ -6346,6 +6393,24 @@ function Copilot() {
             Ask about reconciliation, risk, anomalies,
             exceptions and finance operations.
           </span>
+
+          {userRole && (
+            <span
+              style={{
+                display: "inline-block",
+                marginTop: "8px",
+                padding: "4px 10px",
+                borderRadius: "14px",
+                background: "#eef6ff",
+                border: "1px solid #cfe4fb",
+                color: "#1e56a0",
+                fontSize: "12px",
+                fontWeight: 600,
+              }}
+            >
+              Personalized to your role: {userRole}
+            </span>
+          )}
         </div>
       </header>
 

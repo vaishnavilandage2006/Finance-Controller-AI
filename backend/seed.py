@@ -2,6 +2,7 @@
 from app.db import Base, engine, SessionLocal
 from app.models import *
 from app.core.security import hash_password
+from app.core.bootstrap import demo_admin_credentials
 from app.services.risk.engine import calculate
 import csv
 import pathlib
@@ -19,36 +20,41 @@ db = SessionLocal()
 # ADMIN USER
 # ============================================================
 
-admin_email = "admin@demo.com"
-admin_password = "DemoPassword123!"
+# Admin credentials come from configuration (BOOTSTRAP_ADMIN_EMAIL /
+# BOOTSTRAP_ADMIN_PASSWORD env vars, see app/core/config.py). The password
+# is never printed; a development-only fallback applies outside production.
+admin_email, admin_password = demo_admin_credentials()
 
-admin = db.query(User).filter_by(email=admin_email).first()
-
-if admin:
-    # Update existing admin credentials
-    admin.password_hash = hash_password(admin_password)
-    admin.role = "Admin"
+if not admin_password:
+    print("Admin bootstrap skipped: BOOTSTRAP_ADMIN_PASSWORD is not configured.")
 else:
-    # Check whether an old admin/demo user exists
-    old_admin = db.query(User).filter(
-        User.email == "admin@demo.local"
-    ).first()
+    admin = db.query(User).filter_by(email=admin_email).first()
 
-    if old_admin:
-        old_admin.email = admin_email
-        old_admin.password_hash = hash_password(admin_password)
-        old_admin.role = "Admin"
+    if admin:
+        # Update existing admin credentials
+        admin.password_hash = hash_password(admin_password)
+        admin.role = "Admin"
     else:
-        # Create new admin
-        db.add(
-            User(
-                email=admin_email,
-                password_hash=hash_password(admin_password),
-                role="Admin"
-            )
-        )
+        # Check whether an old admin/demo user exists
+        old_admin = db.query(User).filter(
+            User.email == "admin@demo.local"
+        ).first()
 
-db.commit()
+        if old_admin:
+            old_admin.email = admin_email
+            old_admin.password_hash = hash_password(admin_password)
+            old_admin.role = "Admin"
+        else:
+            # Create new admin
+            db.add(
+                User(
+                    email=admin_email,
+                    password_hash=hash_password(admin_password),
+                    role="Admin"
+                )
+            )
+
+    db.commit()
 
 
 # ============================================================
@@ -172,7 +178,9 @@ db.commit()
 
 print("Seed complete")
 print()
-print("Admin login:")
-print("Email: admin@demo.com")
-print("Password: DemoPassword123!")
+print(f"Admin email: {admin_email}")
+if admin_password:
+    print("Admin password: configured via BOOTSTRAP_ADMIN_PASSWORD (not printed)")
+else:
+    print("Admin account not created (BOOTSTRAP_ADMIN_PASSWORD unset)")
 
