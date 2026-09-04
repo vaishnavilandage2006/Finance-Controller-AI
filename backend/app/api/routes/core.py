@@ -26,11 +26,71 @@ from ...services.reconciliation.adaptive import (
     parse_source,
     reconcile_sources,
 )
+from ...services.razorpay.adapter import (
+    RazorpayAPIError,
+    RazorpayConfigurationError,
+    fetch_test_payments,
+    payments_csv,
+)
 
 import json
+from io import BytesIO
 
 
 router = APIRouter()
+
+
+# ============================================================
+# RAZORPAY TEST MODE
+# ============================================================
+
+@router.get("/razorpay/test-payments")
+def razorpay_test_payments(
+    limit: int = 100,
+    u=Depends(current_user),
+):
+    if settings.razorpay_mode.lower() != "test":
+        raise HTTPException(503, "Razorpay integration is restricted to test mode")
+    try:
+        payments = fetch_test_payments(
+            settings.razorpay_key_id,
+            settings.razorpay_key_secret,
+            limit,
+        )
+    except RazorpayConfigurationError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except RazorpayAPIError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return {"source": "razorpay_test", "count": len(payments), "items": payments}
+
+
+@router.post("/razorpay/test-payments/import")
+async def import_razorpay_test_payments(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    u=Depends(current_user),
+):
+    if settings.razorpay_mode.lower() != "test":
+        raise HTTPException(503, "Razorpay integration is restricted to test mode")
+    try:
+        payments = fetch_test_payments(
+            settings.razorpay_key_id,
+            settings.razorpay_key_secret,
+            limit,
+        )
+    except RazorpayConfigurationError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except RazorpayAPIError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    if not payments:
+        return {"source": "razorpay_test", "imported": 0, "duplicates": 0, "errors": [], "warnings": ["No Razorpay test payments were returned."]}
+    upload = UploadFile(
+        file=BytesIO(payments_csv(payments)),
+        filename="razorpay-test-payments.csv",
+    )
+    result = await import_csv(upload, db, u)
+    result["source"] = "razorpay_test"
+    return result
 
 # ============================================================
 # RUNTIME EXCEPTION RISK HELPERS
@@ -2013,9 +2073,19 @@ def copilot(
 
     m["review_records"] = review_context
 
+    provider_key = settings.ai_api_key
+    provider_model = None
+    if settings.ai_provider.lower() == "openai":
+        provider_key = settings.openai_api_key
+        provider_model = settings.openai_model
+    elif settings.ai_provider.lower() == "gemini":
+        provider_key = settings.gemini_api_key
+        provider_model = settings.gemini_model
+
     answer = get_provider(
         settings.ai_provider,
-        settings.ai_api_key
+        provider_key,
+        provider_model,
     ).answer(
         b.question,
         m
