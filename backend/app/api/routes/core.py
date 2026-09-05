@@ -1019,6 +1019,7 @@ async def single_file_reconciliation(
         db,
         (record["reference"] for record in records),
     )
+    single_file_transactions = []
 
     for record in records:
         amount = next(
@@ -1046,6 +1047,7 @@ async def single_file_reconciliation(
             lookup_if_missing=False,
         )
         transaction_map[record["reference"]] = transaction
+        single_file_transactions.append(transaction)
         db.add(ReconciliationResult(
             run_id=run_id,
             transaction_id=record["reference"],
@@ -1071,6 +1073,28 @@ async def single_file_reconciliation(
         match_rate=match_rate,
         total_variance=variance,
     ))
+
+    statistical_anomalies = []
+    analysis = analyze_transactions(single_file_transactions)
+    for anomaly in analysis["anomalies"]:
+        db.add(Anomaly(
+            transaction_id=anomaly["transaction_id"],
+            reason=anomaly["reason"],
+            severity=anomaly["severity"],
+            score=float(anomaly["score"] or 0),
+            evidence=(
+                f"Run {run_id}; "
+                f"{anomaly.get('method', '')}; "
+                f"{anomaly.get('evidence', '')}"
+            ),
+        ))
+        statistical_anomalies.append({
+            "transaction_id": anomaly["transaction_id"],
+            "reason": anomaly["reason"],
+            "severity": anomaly["severity"],
+            "score": anomaly["score"],
+        })
+
     for record in records:
         if record["status"] in {"PARTIAL", "MISMATCH", "UNMATCHED", "DUPLICATE", "EXCEPTION"}:
             db.add(ReviewItem(
@@ -1120,6 +1144,7 @@ async def single_file_reconciliation(
         "match_rate": match_rate,
         "variance": variance,
         "records": records,
+        "statistical_anomalies": statistical_anomalies,
     }
 
 
@@ -1215,11 +1240,18 @@ def anomalies(
     # operated on; an explicit run_id still reaches any historical run.
     run = resolve_run(db, run_id)
     query = db.query(Anomaly)
+    reconciliation_variances = {}
     if run:
         run_id = run.run_id
         query = query.filter(
             Anomaly.evidence.like(f"%Run {run_id}%")
         )
+        reconciliation_variances = {
+            row.transaction_id: abs(float(row.variance or 0))
+            for row in db.query(ReconciliationResult).filter(
+                ReconciliationResult.run_id == run_id
+            ).all()
+        }
     return [
         {
             "transaction_id": x.transaction_id,
@@ -1227,6 +1259,7 @@ def anomalies(
             "severity": x.severity,
             "evidence": x.evidence,
             "score": x.score,
+            "variance": reconciliation_variances.get(x.transaction_id),
         }
         for x in (
             query.order_by(Anomaly.score.desc())

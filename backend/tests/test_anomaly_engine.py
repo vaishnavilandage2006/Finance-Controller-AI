@@ -196,6 +196,76 @@ def test_import_creates_statistical_anomaly_separate_from_exception(tmp_path):
         app.dependency_overrides.clear()
 
 
+def test_single_file_upload_persists_anomalies_variance_and_current_run_history(tmp_path):
+    client, session_factory = _make_client(tmp_path)
+    try:
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "admin@demo.com", "password": "DemoPassword123!"},
+        )
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        rows = ["transaction_id,date,amount,type,status,settlement_amount,merchant"]
+        for index in range(1, 21):
+            amount = 1000 + index
+            settlement = amount
+            merchant = f"Merchant {index}"
+            if index in {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 19, 20}:
+                merchant = "XYZ Mart"
+            if index in {9, 10, 11, 19, 20}:
+                amount = settlement = 1500
+            if index == 9:
+                settlement = 1490
+            if index == 5:
+                amount = settlement = 500000
+            if index in {7, 18}:
+                amount = 2300 if index == 7 else 2000
+                settlement = 2200 if index == 7 else 1900
+            rows.append(
+                f"TXN{index:03d},2026-09-05,{amount},revenue,completed,{settlement},{merchant}"
+            )
+        first = client.post(
+            "/api/reconciliation/single-file",
+            files={"file": ("suspicious_finance_test.csv", ("\n".join(rows) + "\n").encode(), "text/csv")},
+            headers=headers,
+        )
+        assert first.status_code == 200
+        first_body = first.json()
+        first_run_id = first_body["run_id"]
+        assert first_body["statistical_anomalies"]
+        assert any(item["transaction_id"] == "TXN005" for item in first_body["statistical_anomalies"])
+
+        current_anomalies = client.get("/api/anomalies", headers=headers).json()
+        by_transaction = {item["transaction_id"]: item for item in current_anomalies}
+        assert "TXN005" in by_transaction
+        assert by_transaction["TXN005"]["variance"] == 0
+        assert by_transaction["TXN009"]["variance"] == 10
+
+        normal_rows = ["transaction_id,date,amount,type,status,settlement_amount,merchant"]
+        for index in range(1, 21):
+            amount = 2000 + index
+            normal_rows.append(
+                f"NORMAL{index:03d},2026-09-06,{amount},revenue,completed,{amount},Normal Merchant {index}"
+            )
+        second = client.post(
+            "/api/reconciliation/single-file",
+            files={"file": ("normal.csv", ("\n".join(normal_rows) + "\n").encode(), "text/csv")},
+            headers=headers,
+        )
+        assert second.status_code == 200
+        second_run_id = second.json()["run_id"]
+        assert second_run_id != first_run_id
+        assert client.get("/api/anomalies", headers=headers).json() == []
+
+        historical = client.get(
+            f"/api/anomalies?run_id={first_run_id}", headers=headers
+        ).json()
+        assert any(item["transaction_id"] == "TXN005" for item in historical)
+        assert all("Run " + first_run_id in item["evidence"] for item in historical)
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_statistical_anomaly_endpoint_is_grounded_in_real_rows(tmp_path):
     client, session_factory = _make_client(tmp_path)
     try:

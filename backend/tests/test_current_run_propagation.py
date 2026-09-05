@@ -233,11 +233,14 @@ def test_risk_and_anomaly_consume_current_run_records(client):
     }
     assert dashboard["high_risk"] == 0
 
-    # /api/anomalies without a run_id defaults to the CURRENT run: this run
-    # has no HIGH/CRITICAL exceptions, so no anomaly rows were created for
-    # it (exceptions and anomalies stay conceptually separate).
+    # /api/anomalies without a run_id defaults to the CURRENT run. The
+    # single-file path now runs independent statistical detection, so this
+    # synthetic dataset's merchant concentration is visible for run 2 while
+    # remaining separate from exception-driven risk.
     anomalies = test_client.get("/api/anomalies", headers=auth_headers(test_client)).json()
-    assert anomalies == []
+    assert anomalies
+    assert {item["transaction_id"] for item in anomalies} == {"Merchant"}
+    assert {item["variance"] for item in anomalies} == {None}
     anomalies1 = test_client.get(
         f"/api/anomalies?run_id={run1_id}", headers=auth_headers(test_client)
     ).json()
