@@ -4,15 +4,15 @@ AI-Powered Financial Control, Risk Detection & CFO Decision Intelligence
 
 Detect → Reconcile → Investigate → Forecast → Simulate → Decide → Audit
 
-LIVE DEMO
+# LIVE DEMO
 https://finance-controller-ai-production.up.railway.app/
 
-DEMO LOGIN
+# DEMO LOGIN
 Email: admin@demo.com
 Password: 7cJeyeytqLyo4uv2TUFYuuiKxJUW
 https://finance-controller-ai-production.up.railway.app
 
-API DOCUMENTATION
+# API DOCUMENTATION
 Run the backend locally and open:
 http://localhost:8000/docs
 
