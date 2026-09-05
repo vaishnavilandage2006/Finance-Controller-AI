@@ -24,21 +24,23 @@ http://localhost:8000/docs
 
 # Table of Contents
 
-1. Problem Statement
-2. Solution
-3. Key Features
-4. Security
-5. Performance
-6. Testing
-7. Tech Stack
-8. Core Control Loop
-9. Demo Flow
-10. Local Setup
-11. Architecture
-12. Design Philosophy
-13. Why It Matters
-14. Future Improvements
-15. Author
+# Table of Contents
+
+1. [Problem Statement](#problem-statement)
+2. [Solution](#solution)
+3. [Key Features](#key-features)
+4. [Security](#security)
+5. [Performance](#performance)
+6. [Testing](#testing)
+7. [Tech Stack](#tech-stack)
+8. [Core Control Loop](#core-control-loop)
+9. [Demo Flow](#demo-flow)
+10. [Local Setup](#local-setup)
+11. [Architecture](#architecture)
+12. [Design Philosophy](#design-philosophy)
+13. [Why It Matters](#why-it-matters)
+14. [Future Improvements](#future-improvements)
+15. [Author](#author)
 
 
 # Problem Statement
