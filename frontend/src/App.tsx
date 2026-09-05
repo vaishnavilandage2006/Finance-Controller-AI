@@ -6132,12 +6132,13 @@ function CfoCommandCenter() {
   const revenue = moneyValue("revenue", Number(metrics.revenue || 0));
   const expense = moneyValue("expenses", Number(metrics.expenses || 0));
   const netPosition = Number(metrics.net_profit || 0);
+  const netPositionAvailable = Boolean(financial?.net_profit?.available);
   const hasTrend = trend.length > 0;
   const severity = (danger: boolean, warning: boolean) => danger ? "danger" : warning ? "warning" : "positive";
   const kpis = [
-    { label: "Revenue", value: currency(revenue), detail: financial.revenue?.available ? "Current data" : "Unavailable in current data", tone: severity(revenue < 0, !financial.revenue?.available) },
-    { label: "Expenses", value: currency(expense), detail: financial.expenses?.available ? "Current data" : "Unavailable in current data", tone: severity(expense > revenue && revenue > 0, !financial.expenses?.available) },
-    { label: "Net position", value: currency(netPosition), detail: netPosition >= 0 ? "Positive position" : "Negative position", tone: severity(netPosition < 0, false) },
+    { label: "Revenue", value: financial.revenue?.available ? currency(revenue) : "Unavailable", detail: financial.revenue?.available ? "Current run data" : "Not in the current run's source schema", tone: severity(revenue < 0, !financial.revenue?.available) },
+    { label: "Expenses", value: financial.expenses?.available ? currency(expense) : "Unavailable", detail: financial.expenses?.available ? "Current run data" : "Not in the current run's source schema", tone: severity(expense > revenue && revenue > 0, !financial.expenses?.available) },
+    { label: "Net position", value: netPositionAvailable ? currency(netPosition) : "Unavailable", detail: netPositionAvailable ? (netPosition >= 0 ? "Positive position" : "Negative position") : "Not in the current run's source schema", tone: severity(netPosition < 0, !netPositionAvailable) },
     { label: "Risk exposure", value: currency(riskExposure), detail: `${Number(metrics.high_risk || 0)} high-risk items`, tone: severity(Number(metrics.high_risk || 0) > 0, riskExposure > 0) },
     { label: "Reconciliation health", value: `${health.toFixed(1)}%`, detail: `${unresolved} unresolved`, tone: severity(health < 90, health < 98) },
   ];
@@ -6199,7 +6200,7 @@ function CfoCommandCenter() {
 
       <section className="panel"><div className="cfo-panel-heading"><div><h2>Audit / control trail</h2><p>Traceable to backend control and audit data</p></div></div>{auditItems.length ? <div style={{ maxHeight: 260, overflowY: "auto" }}>{auditItems.map((entry: any, index: number) => <div key={index} style={{ display: "flex", gap: 12, padding: "10px 0", borderBottom: "1px solid #eef2f7", fontSize: 13, alignItems: "center" }}><span style={{ minWidth: 180, fontWeight: 700, color: "#1e56a0" }}>{entry.action}</span><span style={{ color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{String(entry.detail || "")}</span><span style={{ color: "#94a3b8", marginLeft: "auto", whiteSpace: "nowrap" }}>{entry.created_at ? new Date(entry.created_at).toLocaleString() : ""}</span></div>)}</div> : <div className="cfo-empty">No audit events are recorded yet.</div>}</section>
 
-      <section className="cfo-takeaway"><div><span className="cfo-eyebrow">CFO TAKEAWAY</span><h2>Decision-ready summary</h2><div className="cfo-takeaway-metrics"><span>Revenue <b>{currency(revenue)}</b></span><span>Expenses <b>{currency(expense)}</b></span><span>Risk exposure <b>{currency(riskExposure)}</b></span><span>Unresolved <b>{unresolved}</b></span></div><p><strong>DECISION:</strong> {unresolved || Number(metrics.high_risk || 0) ? "Prioritize unresolved reconciliation and risk items before approving the current financial position." : "The current data shows no unresolved control issues requiring immediate escalation."}</p></div><button type="button" style={primaryButton} onClick={() => navigate("/reconciliation")}>Review current controls</button></section>
+      <section className="cfo-takeaway"><div><span className="cfo-eyebrow">CFO TAKEAWAY</span><h2>Decision-ready summary</h2><div className="cfo-takeaway-metrics"><span>Revenue <b>{financial.revenue?.available ? currency(revenue) : "Unavailable"}</b></span><span>Expenses <b>{financial.expenses?.available ? currency(expense) : "Unavailable"}</b></span><span>Risk exposure <b>{currency(riskExposure)}</b></span><span>Unresolved <b>{unresolved}</b></span></div><p><strong>DECISION:</strong> {unresolved || Number(metrics.high_risk || 0) ? "Prioritize unresolved reconciliation and risk items before approving the current financial position." : "The current data shows no unresolved control issues requiring immediate escalation."}</p></div><button type="button" style={primaryButton} onClick={() => navigate("/reconciliation")}>Review current controls</button></section>
     </div>
   );
 }

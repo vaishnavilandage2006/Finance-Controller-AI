@@ -6,6 +6,52 @@ EXPENSE_TYPES = ("expense", "purchase", "payout")
 EXCEPTION_STATUSES = {"PARTIAL", "MISMATCH", "UNMATCHED", "DUPLICATE", "EXCEPTION"}
 
 
+def current_run(db):
+    """Single authoritative current-run resolver: the latest COMPLETED
+    reconciliation run. Every downstream module defaults to this run so the
+    UI always operates on the most recent upload rather than on a mix of
+    the current run and historical database rows."""
+    from ...models import ReconciliationRun
+
+    return (
+        db.query(ReconciliationRun)
+        .filter(ReconciliationRun.status == "COMPLETED")
+        .order_by(ReconciliationRun.created_at.desc(), ReconciliationRun.id.desc())
+        .first()
+    )
+
+
+def resolve_run(db, run_id):
+    """Resolve an explicit run_id when provided, otherwise fall back to the
+    current run. Historical runs stay reachable via their run_id; the
+    default is always the latest completed run."""
+    if run_id:
+        from ...models import ReconciliationRun
+
+        return (
+            db.query(ReconciliationRun)
+            .filter(ReconciliationRun.run_id == run_id)
+            .first()
+        )
+    return current_run(db)
+
+
+def current_run_transaction_ids(db, run):
+    """Set of transaction_ids belonging to a reconciliation run. Returns
+    None when there is no run so callers can keep the legacy unscoped
+    behaviour (fresh databases / direct transaction seeding)."""
+    if run is None:
+        return None
+    from ...models import ReconciliationResult
+
+    rows = (
+        db.query(ReconciliationResult.transaction_id)
+        .filter(ReconciliationResult.run_id == run.run_id)
+        .all()
+    )
+    return {row.transaction_id for row in rows}
+
+
 def _level_counts(rows):
     counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
     for row in rows:
@@ -45,17 +91,13 @@ def _financial_from_transactions(txns):
 
 def metrics(db):
     from ...models import Transaction, RiskAssessment, ReconciliationResult
-    from ...models import ReconciliationRun
-    transaction_count = db.query(func.count(Transaction.id)).scalar() or 0
-    revenue = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
-        func.lower(Transaction.type).in_(REVENUE_TYPES)
-    ).scalar() or 0
-    expenses = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
-        func.lower(Transaction.type).in_(EXPENSE_TYPES)
-    ).scalar() or 0
-    refunds = db.query(func.coalesce(func.sum(Transaction.refund_amount), 0)).scalar() or 0
-    fees = db.query(func.coalesce(func.sum(Transaction.fee), 0)).scalar() or 0
-    latest_run = db.query(ReconciliationRun).filter(ReconciliationRun.status == "COMPLETED").order_by(ReconciliationRun.created_at.desc(), ReconciliationRun.id.desc()).first()
+
+    # ------------------------------------------------------------------
+    # Single authoritative current run: every value below derives from it
+    # when one exists; a fresh database (no runs yet) keeps the legacy
+    # global aggregation so direct transaction seeding still works.
+    # ------------------------------------------------------------------
+    latest_run = current_run(db)
     if latest_run:
         rec = db.query(ReconciliationResult).filter(
             ReconciliationResult.run_id == latest_run.run_id
@@ -104,9 +146,9 @@ def metrics(db):
     # ----------------------------------------------------------
     # Current-run display metadata (files, mode, status)
     # ----------------------------------------------------------
-    current_run = None
+    run_metadata = None
     if latest_run:
-        current_run = {
+        run_metadata = {
             "run_id": latest_run.run_id,
             "mode": latest_run.mode,
             "status": latest_run.status,
@@ -172,21 +214,51 @@ def metrics(db):
         })
     largest_exception = top_exceptions[0] if top_exceptions else None
 
+    # ------------------------------------------------------------------
+    # Top-level convenience metrics: scoped to the current run when one
+    # exists (so the dashboard/settings/Copilot never mix the current run
+    # with historical database rows). Values mirror the availability-aware
+    # ``financial`` block: a run whose source CSV carries no revenue/
+    # expense/refund/fee dimension reports those as unavailable, never as
+    # invented non-zero totals.
+    # ------------------------------------------------------------------
+    if latest_run:
+        total_transactions = latest_run.total
+        revenue = financial["revenue"]["value"]
+        expenses = financial["expenses"]["value"]
+        refunds = financial["refunds"]["value"]
+        fees = financial["fees"]["value"]
+        net_profit = financial["net_profit"]["value"]
+        cash_balance = financial["cash_balance"]["value"]
+    else:
+        # Legacy global aggregation for databases without any run yet.
+        total_transactions = db.query(func.count(Transaction.id)).scalar() or 0
+        revenue = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+            func.lower(Transaction.type).in_(REVENUE_TYPES)
+        ).scalar() or 0
+        expenses = db.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+            func.lower(Transaction.type).in_(EXPENSE_TYPES)
+        ).scalar() or 0
+        refunds = db.query(func.coalesce(func.sum(Transaction.refund_amount), 0)).scalar() or 0
+        fees = db.query(func.coalesce(func.sum(Transaction.fee), 0)).scalar() or 0
+        net_profit = revenue - expenses - refunds - fees
+        cash_balance = net_profit
+
     return {
         "revenue": revenue,
         "expenses": expenses,
-        "net_profit": revenue - expenses - refunds - fees,
+        "net_profit": net_profit,
         "refunds": refunds,
         "fees": fees,
         "high_risk": risks,
-        "total_transactions": transaction_count,
+        "total_transactions": total_transactions,
         "reconciliation_rate": reconciliation["match_rate"],
-        "cash_balance": revenue - expenses - refunds - fees,
+        "cash_balance": cash_balance,
         "currency": "INR",
         "largest_variance": max([abs(r.variance) for r in scoped_results], default=0),
         "reconciliation": reconciliation,
         # ---- current-run additions (Overview / charts) ----
-        "current_run": current_run,
+        "current_run": run_metadata,
         "risk_distribution": risk_distribution,
         "top_exceptions": top_exceptions,
         "largest_exception": largest_exception,

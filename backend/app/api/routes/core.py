@@ -7,7 +7,12 @@ from datetime import datetime
 from ...db import get_db
 from ...models import *
 from ...api.dependencies.auth import current_user
-from ...services.finance.engine import metrics
+from ...services.finance.engine import (
+    current_run,
+    current_run_transaction_ids,
+    metrics,
+    resolve_run,
+)
 from ...services.risk.engine import (
     assess_exception,
     calculate,
@@ -202,12 +207,24 @@ def _upsert_exception_risk(db, run_id, transaction_ref, amount, settlement_amoun
 def transactions(
     page: int = 1,
     page_size: int = 25,
+    run_id: str | None = None,
     db: Session = Depends(get_db),
     u=Depends(current_user)
 ):
+    # Scope to the current reconciliation run (or an explicit historical
+    # run_id) so the transactions page shows the run being operated on,
+    # never a blind aggregate of every historical row in the database.
+    run = resolve_run(db, run_id)
     q = db.query(Transaction).order_by(Transaction.id.desc())
 
-    total = q.count()
+    total = 0
+    if run:
+        run_ids = current_run_transaction_ids(db, run)
+        if run_ids:
+            q = q.filter(Transaction.transaction_id.in_(run_ids))
+            total = len(run_ids)
+    else:
+        total = q.count()
 
     rows = (
         q.offset((page - 1) * page_size)
@@ -237,6 +254,7 @@ def transactions(
         ],
         "total": total,
         "page": page,
+        "run_id": run.run_id if run else None,
     }
 
 
@@ -1037,8 +1055,12 @@ def risk(
     run_id: str | None = None,
     u=Depends(current_user)
 ):
+    # Default to the current run so the risk page reflects the run being
+    # operated on; an explicit run_id still reaches any historical run.
+    run = resolve_run(db, run_id)
     query = db.query(RiskAssessment)
-    if run_id:
+    if run:
+        run_id = run.run_id
         query = query.filter(
             RiskAssessment.risk_factors.like(
                 f"%{run_marker(run_id)}%"
@@ -1111,8 +1133,12 @@ def anomalies(
     run_id: str | None = None,
     u=Depends(current_user)
 ):
+    # Default to the current run so the anomaly page reflects the run being
+    # operated on; an explicit run_id still reaches any historical run.
+    run = resolve_run(db, run_id)
     query = db.query(Anomaly)
-    if run_id:
+    if run:
+        run_id = run.run_id
         query = query.filter(
             Anomaly.evidence.like(f"%Run {run_id}%")
         )
@@ -1708,8 +1734,15 @@ def _forecast_payload(db, m):
     revenue_types = ("revenue", "income", "sale", "payment")
     expense_types = ("expense", "purchase", "payout")
 
+    # Forecast on the CURRENT run's dated transactions when a run exists:
+    # never mix unrelated historical rows into the current-run view. An
+    # explicit forecast on a database without any run keeps the legacy
+    # global behaviour (direct transaction seeding / pre-run databases).
+    run = current_run(db)
+    run_id = run.run_id if run else None
+
     if m["total_transactions"] < 30:
-        return {
+        payload = {
             "message": "Insufficient historical data for reliable forecasting.",
             "available": False,
             "method": (
@@ -1717,12 +1750,26 @@ def _forecast_payload(db, m):
                 "trend); requires at least 30 dated transactions"
             ),
         }
+        if run_id:
+            payload["run_id"] = run_id
+        return payload
 
-    dated_transactions = (
-        db.query(Transaction)
-        .filter(Transaction.date.isnot(None))
-        .all()
-    )
+    if run_id:
+        run_transaction_ids = current_run_transaction_ids(db, run) or set()
+        dated_query = db.query(Transaction).filter(Transaction.date.isnot(None))
+        if run_transaction_ids:
+            dated_query = dated_query.filter(
+                Transaction.transaction_id.in_(run_transaction_ids)
+            )
+        else:
+            dated_query = dated_query.filter(False)
+        dated_transactions = dated_query.all()
+    else:
+        dated_transactions = (
+            db.query(Transaction)
+            .filter(Transaction.date.isnot(None))
+            .all()
+        )
 
     daily = {
         "revenue": defaultdict(float),
@@ -1821,7 +1868,7 @@ def _forecast_payload(db, m):
         f"transactions; {HORIZON_DAYS}-day horizon; no fabricated confidence intervals"
     )
 
-    return {
+    payload = {
         "available": True,
         "method": method,
         "horizon_days": HORIZON_DAYS,
@@ -1842,6 +1889,9 @@ def _forecast_payload(db, m):
             else None
         ),
     }
+    if run_id:
+        payload["run_id"] = run_id
+    return payload
 
 
 @router.get("/forecast")
@@ -1875,7 +1925,18 @@ def _project_scenario(
 ):
     """Deterministic scenario projection shared by /scenarios and the CFO
     command center. volume_change scales every money movement (transaction
-    volume); per-category changes then apply on top."""
+    volume); per-category changes then apply on top.
+
+    When the current run's source schema carries no revenue/expense
+    financial dimension the projection is explicitly reported as
+    unavailable (available=False) instead of pretending the run has a
+    zero-based P&L to simulate."""
+    financial = m.get("financial") or {}
+    run_exists = bool(m.get("current_run"))
+    rev_available = bool((financial.get("revenue") or {}).get("available"))
+    exp_available = bool((financial.get("expenses") or {}).get("available"))
+    dimensions_unavailable = run_exists and not rev_available and not exp_available
+
     volume_factor = (
         1 + volume_change / 100
     )
@@ -1911,7 +1972,7 @@ def _project_scenario(
         - fees
     )
 
-    return {
+    payload = {
         "projected_revenue":
             round(rev, 2),
 
@@ -1947,6 +2008,16 @@ def _project_scenario(
             if profit < 0
             else "NORMAL",
     }
+    if dimensions_unavailable:
+        payload["available"] = False
+        payload["note"] = (
+            "The current reconciliation run's source schema does not carry a "
+            "revenue/expense financial dimension, so scenario projections are "
+            "unavailable rather than fabricated as zero-based results."
+        )
+    else:
+        payload["available"] = True
+    return payload
 
 
 @router.post("/scenarios")
@@ -1990,16 +2061,29 @@ def cfo_report(
     revenue_types = ("revenue", "income", "sale", "payment")
     expense_types = ("expense", "purchase", "payout")
     type_name = func.lower(Transaction.type)
-    daily_rows = db.query(
+
+    # The CFO trend/breakdown charts are scoped to the current run's
+    # transactions so they never mix historical database rows into the
+    # executive view. A database without any run keeps the legacy global
+    # aggregation.
+    cfo_run = current_run(db)
+    cfo_run_ids = current_run_transaction_ids(db, cfo_run)
+
+    daily_query = db.query(
         Transaction.date,
         func.coalesce(func.sum(case((type_name.in_(revenue_types), Transaction.amount), else_=0)), 0).label("revenue"),
         func.coalesce(func.sum(case((type_name.in_(expense_types), Transaction.amount), else_=0)), 0).label("expenses"),
-    ).filter(Transaction.date.isnot(None)).group_by(Transaction.date).order_by(Transaction.date).all()
-    expense_rows = db.query(
+    ).filter(Transaction.date.isnot(None))
+    expense_query = db.query(
         Transaction.type,
         func.coalesce(func.sum(Transaction.amount), 0).label("amount"),
         func.count(Transaction.id).label("count"),
-    ).filter(type_name.in_(expense_types)).group_by(Transaction.type).order_by(func.sum(Transaction.amount).desc()).all()
+    ).filter(type_name.in_(expense_types))
+    if cfo_run_ids is not None:
+        daily_query = daily_query.filter(Transaction.transaction_id.in_(cfo_run_ids))
+        expense_query = expense_query.filter(Transaction.transaction_id.in_(cfo_run_ids))
+    daily_rows = daily_query.group_by(Transaction.date).order_by(Transaction.date).all()
+    expense_rows = expense_query.group_by(Transaction.type).order_by(func.sum(Transaction.amount).desc()).all()
     report_metrics = metrics(db)
 
     current_run_id = report_metrics.get("reconciliation", {}).get("run_id")
