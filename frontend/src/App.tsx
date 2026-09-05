@@ -6205,6 +6205,87 @@ function CfoCommandCenter() {
   );
 }
 
+function TransactionsPage() {
+  const [items, setItems] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [search, setSearch] = useState("");
+  const [submittedSearch, setSubmittedSearch] = useState("");
+  const [runId, setRunId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const pageSize = 25;
+
+  async function loadTransactions() {
+    setLoading(true);
+    setError("");
+    try {
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (submittedSearch) params.set("q", submittedSearch);
+      const result = await apiGet(`/transactions?${params.toString()}`);
+      setItems(Array.isArray(result.items) ? result.items : []);
+      setTotal(Number(result.total || 0));
+      setRunId(result.run_id || null);
+    } catch (err) {
+      console.error(err);
+      setError("Unable to load transactions.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadTransactions();
+  }, [page, submittedSearch]);
+
+  function submitSearch(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPage(1);
+    setSubmittedSearch(search.trim());
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const display = (value: unknown) => value === null || value === undefined || value === "" ? "—" : String(value);
+  const amount = (value: unknown) => value === null || value === undefined ? "—" : currency(Number(value));
+
+  return (
+    <>
+      <header>
+        <div>
+          <h1>Transactions</h1>
+          <p style={{ marginTop: "4px", opacity: 0.7 }}>Backend records for the current reconciliation run.</p>
+        </div>
+        <span>{runId ? `Run ${runId}` : "No reconciliation run"}</span>
+      </header>
+      <div className="panel">
+        <form onSubmit={submitSearch} style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+          <input aria-label="Search transactions" placeholder="Search transaction, merchant, or vendor" value={search} onChange={(event) => setSearch(event.target.value)} style={{ flex: "1 1 280px", padding: "11px", border: "1px solid #cdd9e8", borderRadius: "8px", font: "inherit" }} />
+          <button type="submit" style={primaryButton}>Search</button>
+          {submittedSearch ? <button type="button" style={secondaryButton} onClick={() => { setSearch(""); setPage(1); setSubmittedSearch(""); }}>Clear</button> : null}
+        </form>
+      </div>
+      <div className="panel" style={{ overflowX: "auto" }}>
+        {loading ? <div className="state">Loading transactions...</div> : error ? (
+          <div className="state"><p>{error}</p><button type="button" onClick={loadTransactions}>Retry</button></div>
+        ) : items.length === 0 ? (
+          <div className="state">No transactions found for the current run.</div>
+        ) : (
+          <table style={{ width: "100%", minWidth: "1280px", borderCollapse: "collapse" }}>
+            <thead><tr>{["Transaction ID", "Date", "Merchant", "Amount", "Settlement", "Variance", "Reconciliation", "Risk", "Review", "Fee", "Refund", "Currency", "Run ID"].map((heading) => <th key={heading} style={tableHeader}>{heading}</th>)}</tr></thead>
+            <tbody>{items.map((item) => <tr key={`${item.run_id || "current"}-${item.transaction_id}`}>
+              <td style={tableCell}><strong>{display(item.transaction_id)}</strong></td><td style={tableCell}>{display(item.date)}</td><td style={tableCell}>{display(item.merchant || item.vendor)}</td><td style={tableCell}>{amount(item.amount)}</td><td style={tableCell}>{amount(item.settlement_amount)}</td><td style={tableCell}>{amount(item.variance)}</td><td style={tableCell}>{item.reconciliation_status ? <StatusBadge status={item.reconciliation_status} /> : "—"}</td><td style={tableCell}>{display(item.risk_level)}</td><td style={tableCell}>{item.review_status ? <StatusBadge status={item.review_status} /> : "—"}</td><td style={tableCell}>{amount(item.fee)}</td><td style={tableCell}>{amount(item.refund_amount)}</td><td style={tableCell}>{display(item.currency)}</td><td style={tableCell}>{display(item.run_id)}</td>
+            </tr>)}</tbody>
+          </table>
+        )}
+      </div>
+      <div className="panel" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+        <span>{total.toLocaleString("en-IN")} records · Page {page} of {totalPages}</span>
+        <div style={{ display: "flex", gap: "8px" }}><button type="button" style={secondaryButton} disabled={loading || page <= 1} onClick={() => setPage((value) => value - 1)}>Previous</button><button type="button" style={secondaryButton} disabled={loading || page >= totalPages} onClick={() => setPage((value) => value + 1)}>Next</button></div>
+      </div>
+    </>
+  );
+}
+
 function Page({
   title,
 }: {
@@ -8052,7 +8133,6 @@ function Dashboard() {
 ========================================================= */
 
 const pages = [
-  "Transactions",
   "Settlements",
   "Refunds",
   "Fees",
@@ -8190,6 +8270,13 @@ export default function App() {
       {/* =================================================
           OTHER PAGES
       ================================================= */}
+
+      <Route
+        path="/transactions"
+        element={
+          isLoggedIn ? <Layout><TransactionsPage /></Layout> : <Navigate to="/login" replace />
+        }
+      />
 
       <Route
         path="/scenario-simulator"

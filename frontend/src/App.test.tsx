@@ -314,7 +314,7 @@ describe("Transactions", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Unable to load data/)
+        screen.getByText(/Unable to load transactions/)
       ).toBeTruthy()
     );
   });

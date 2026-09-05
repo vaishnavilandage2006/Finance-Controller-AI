@@ -208,52 +208,130 @@ def transactions(
     page: int = 1,
     page_size: int = 25,
     run_id: str | None = None,
+    q: str | None = None,
     db: Session = Depends(get_db),
     u=Depends(current_user)
 ):
     # Scope to the current reconciliation run (or an explicit historical
     # run_id) so the transactions page shows the run being operated on,
     # never a blind aggregate of every historical row in the database.
+    page = max(1, page)
+    page_size = min(1000, max(1, page_size))
     run = resolve_run(db, run_id)
-    q = db.query(Transaction).order_by(Transaction.id.desc())
+    query = db.query(Transaction).order_by(Transaction.id.desc())
 
-    total = 0
     if run:
         run_ids = current_run_transaction_ids(db, run)
         if run_ids:
-            q = q.filter(Transaction.transaction_id.in_(run_ids))
-            total = len(run_ids)
+            query = query.filter(Transaction.transaction_id.in_(run_ids))
+        else:
+            query = query.filter(False)
     else:
-        total = q.count()
+        run_ids = None
+
+    if q and q.strip():
+        search = f"%{q.strip()}%"
+        query = query.filter(
+            Transaction.transaction_id.ilike(search)
+            | Transaction.merchant.ilike(search)
+            | Transaction.vendor.ilike(search)
+        )
+
+    total = query.count()
 
     rows = (
-        q.offset((page - 1) * page_size)
+        query.offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
 
+    transaction_ids = [row.transaction_id for row in rows]
+    reconciliation_map = {}
+    review_map = {}
+    risk_map = {}
+    if transaction_ids:
+        reconciliation_query = db.query(ReconciliationResult).filter(
+            ReconciliationResult.transaction_id.in_(transaction_ids)
+        )
+        if run:
+            reconciliation_query = reconciliation_query.filter(
+                ReconciliationResult.run_id == run.run_id
+            )
+        reconciliation_map = {
+            row.transaction_id: row
+            for row in reconciliation_query.order_by(ReconciliationResult.id.desc()).all()
+        }
+
+        review_query = db.query(ReviewItem).filter(
+            ReviewItem.transaction_id.in_(transaction_ids)
+        )
+        if run:
+            review_query = review_query.filter(ReviewItem.run_id == run.run_id)
+        review_map = {
+            row.transaction_id: row
+            for row in review_query.order_by(ReviewItem.id.desc()).all()
+        }
+
+        risk_rows = db.query(RiskAssessment).filter(
+            RiskAssessment.transaction_id.in_(transaction_ids)
+        ).order_by(RiskAssessment.id.desc()).all()
+        marker = run_marker(run.run_id) if run else None
+        for risk in risk_rows:
+            if risk.transaction_id not in risk_map or (marker and marker in (risk.risk_factors or "")):
+                risk_map[risk.transaction_id] = risk
+
     return {
         "items": [
             {
-                c: getattr(x, c)
-                for c in [
-                    "transaction_id",
-                    "date",
-                    "amount",
-                    "type",
-                    "status",
-                    "merchant",
-                    "vendor",
-                    "fee",
-                    "refund_amount",
-                    "category",
-                    "currency",
-                ]
+                **{
+                    c: getattr(x, c)
+                    for c in [
+                        "transaction_id",
+                        "date",
+                        "amount",
+                        "type",
+                        "status",
+                        "merchant",
+                        "vendor",
+                        "fee",
+                        "refund_amount",
+                        "category",
+                        "currency",
+                        "settlement_amount",
+                    ]
+                },
+                "variance": (
+                    abs(float(reconciliation_map[x.transaction_id].variance or 0))
+                    if x.transaction_id in reconciliation_map
+                    else None
+                ),
+                "reconciliation_status": (
+                    reconciliation_map[x.transaction_id].status
+                    if x.transaction_id in reconciliation_map
+                    else None
+                ),
+                "risk_score": (
+                    risk_map[x.transaction_id].risk_score
+                    if x.transaction_id in risk_map
+                    else None
+                ),
+                "risk_level": (
+                    risk_map[x.transaction_id].risk_level
+                    if x.transaction_id in risk_map
+                    else None
+                ),
+                "review_status": (
+                    review_map[x.transaction_id].status
+                    if x.transaction_id in review_map
+                    else None
+                ),
+                "run_id": run.run_id if run else None,
             }
             for x in rows
         ],
         "total": total,
         "page": page,
+        "page_size": page_size,
         "run_id": run.run_id if run else None,
     }
 
