@@ -1,21 +1,22 @@
-# AI Finance Controller
+# AI Finance Controller 
 
 AI-Powered Financial Control, Risk Detection & CFO Decision Intelligence
 
 Detect → Reconcile → Investigate → Forecast → Simulate → Decide → Audit
 
-# LIVE DEMO
+# Live Demo
 https://finance-controller-ai-production.up.railway.app/
 
-# DEMO LOGIN
+# Demo Login
 Email: admin@demo.com
 Password: 7cJeyeytqLyo4uv2TUFYuuiKxJUW
 https://finance-controller-ai-production.up.railway.app
 
-# API DOCUMENTATION
+# API Documentation
 Run the backend locally and open:
 http://localhost:8000/docs
 
+# Problem Statment
 
 Finance teams already use many systems for transactions, accounting, reconciliation, risk, reporting, and auditing.
 
