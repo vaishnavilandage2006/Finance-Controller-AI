@@ -2291,6 +2291,10 @@ def alerts(
 
 class Question(BaseModel):
     question: str
+    # Optional, backward-compatible conversation history for follow-up
+    # questions. Sanitized server-side: only role/content pairs, capped to
+    # the last 8 turns and truncated per turn - never trusted as instructions.
+    history: list[dict] | None = None
 
 
 @router.post("/copilot")
@@ -2596,6 +2600,19 @@ def copilot(
         "capabilities": sorted(capabilities_for(tier)),
         "open_review_count": open_review_count,
     }
+
+    # Sanitized conversation history (follow-up context). Malformed turns
+    # are dropped; only user/assistant role/content pairs survive.
+    history = []
+    for turn in (b.history or [])[-8:]:
+        if not isinstance(turn, dict):
+            continue
+        role = str(turn.get("role") or "").strip().lower()
+        content = turn.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        history.append({"role": role, "content": content[:500]})
+    ai_context["conversation_history"] = history
 
     provider_key = settings.ai_api_key
     provider_model = None

@@ -6289,6 +6289,10 @@ function Copilot() {
 
   const [answer, setAnswer] = useState("");
   const [loading, setLoading] = useState(false);
+  const [conversation, setConversation] =
+    useState<{ role: string; content: string }[]>(
+      []
+    );
 
   let userRole = "";
 
@@ -6325,6 +6329,12 @@ function Copilot() {
     setLoading(true);
     setAnswer("");
 
+    const nextConversation = [
+      ...conversation,
+      { role: "user", content: finalQuestion },
+    ];
+    setConversation(nextConversation);
+
     try {
       const token =
         localStorage.getItem("token");
@@ -6351,6 +6361,14 @@ function Copilot() {
 
           body: JSON.stringify({
             question: finalQuestion,
+            // Send only the most recent turns for follow-up context.
+            history:
+              nextConversation
+                .slice(-8)
+                .map((turn) => ({
+                  role: turn.role,
+                  content: turn.content,
+                })),
           }),
         }
       );
@@ -6359,27 +6377,44 @@ function Copilot() {
         await response.json();
 
       if (!response.ok) {
-        setAnswer(
+        const failure =
           data.detail ||
-            "Copilot request failed."
-        );
+          "Copilot request failed.";
+        setAnswer(failure);
+        setConversation([
+          ...nextConversation,
+          { role: "assistant", content: failure },
+        ]);
 
         return;
       }
 
-      setAnswer(
+      const result =
         data.answer ||
-          "No answer returned."
-      );
+        "No answer returned.";
+      setAnswer(result);
+      setConversation([
+        ...nextConversation,
+        { role: "assistant", content: result },
+      ]);
     } catch (error) {
       console.error(error);
 
-      setAnswer(
-        "Unable to connect to Copilot."
-      );
+      const failure =
+        "Unable to connect to Copilot.";
+      setAnswer(failure);
+      setConversation([
+        ...nextConversation,
+        { role: "assistant", content: failure },
+      ]);
     } finally {
       setLoading(false);
     }
+  }
+
+  function clearConversation() {
+    setConversation([]);
+    setAnswer("");
   }
 
   return (
@@ -6565,6 +6600,25 @@ function Copilot() {
           >
             Ctrl + Enter to ask
           </span>
+
+          {conversation.length > 0 && (
+            <button
+              type="button"
+              onClick={clearConversation}
+              disabled={loading}
+              style={{
+                marginLeft: "auto",
+                background: "transparent",
+                border: "1px solid #c9dcf5",
+                color: "#14467e",
+                cursor: loading
+                  ? "not-allowed"
+                  : "pointer",
+              }}
+            >
+              Clear conversation
+            </button>
+          )}
         </div>
 
         {loading && (
@@ -6586,13 +6640,10 @@ function Copilot() {
           </div>
         )}
 
-        {!loading && answer && (
+        {!loading && conversation.length > 0 && (
           <div
-            className="answer"
             style={{
               marginTop: "20px",
-              whiteSpace: "pre-wrap",
-              lineHeight: 1.6,
             }}
           >
             <div
@@ -6601,10 +6652,35 @@ function Copilot() {
                 marginBottom: "10px",
               }}
             >
-              AI Controller Analysis
+              Conversation
             </div>
 
-            {answer}
+            {conversation.map(
+              (turn, index) => (
+                <div
+                  key={index}
+                  className="answer"
+                  style={{
+                    marginBottom: "12px",
+                    whiteSpace: "pre-wrap",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      marginBottom: "6px",
+                    }}
+                  >
+                    {turn.role === "user"
+                      ? "You"
+                      : "AI Controller"}
+                  </div>
+
+                  {turn.content}
+                </div>
+              )
+            )}
           </div>
         )}
 
